@@ -1,0 +1,62 @@
+name: Kanka Sinyal Botu
+
+on:
+  schedule:
+    # NYSE açık saatlerinde saatte bir tara (UTC)
+    # Kış (EST):  14:45 UTC = 09:45 ET  |  Yaz (EDT): 13:45 UTC = 09:45 ET
+    # Her ikisini de ekledik — DST geçişinde sorun olmaz
+    - cron: '45 14 * * 1-5'   # 09:45 ET (kış - EST)
+    - cron: '45 15 * * 1-5'   # 11:45 ET (kış)
+    - cron: '45 16 * * 1-5'   # 12:45 ET (kış)
+    - cron: '45 17 * * 1-5'   # 13:45 ET (kış)
+    - cron: '45 18 * * 1-5'   # 14:45 ET (kış)
+    - cron: '45 19 * * 1-5'   # 15:45 ET (kış) — kapanmadan 15 dk önce
+  workflow_dispatch:           # Manuel tetikleme (test için)
+
+jobs:
+  scan:
+    name: Tarama
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
+
+      - name: config.env oluştur
+        run: |
+          cat > config.env << EOF
+          ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY=${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER_TRADING=${{ secrets.PAPER_TRADING }}
+          FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          TICKERS=AAPL,TSLA,NVDA,SPY,QQQ
+          BUY_THRESHOLD=65
+          SELL_THRESHOLD=35
+          POSITION_PCT=5
+          MAX_POSITIONS=3
+          ATR_SL_MULT=1.5
+          ATR_TP_MULT=3.0
+          SCAN_INTERVAL_MINUTES=60
+          EOF
+
+      - name: Botu çalıştır
+        run: python bot.py --once
+
+      - name: Hata durumunda Telegram'a bildir
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="❌ GitHub Actions başarısız oldu. Loglara bak: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -d parse_mode="HTML"

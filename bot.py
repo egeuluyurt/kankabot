@@ -1,7 +1,7 @@
 """
 Kanka Sinyal Botu v4.0
 ======================
-Alpaca Markets + yfinance/pandas-ta + ApeWisdom + Finnhub + Telegram
+Alpaca Markets + yfinance/ta + ApeWisdom + Finnhub + Telegram
 """
 
 import os
@@ -10,14 +10,16 @@ import sys
 import time
 import asyncio
 import logging
+import argparse
 import threading
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import requests
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -31,6 +33,7 @@ from alpaca.trading.requests import (
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderType
 
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ─── Loglama ──────────────────────────────────────────────────────────────────
@@ -141,13 +144,16 @@ class AlpacaEngine:
         return self.client.get_all_positions()
 
     @retry_on_rate_limit
-    def place_bracket_buy(self, symbol: str, notional: float, sl_price: float, tp_price: float):
-        """Bracket market order — borsa sunucusu SL/TP'yi yönetir."""
-        # Alpaca bracket order için limit_price gerektiği durumlarda
-        # yaklaşık bir limit değeri kullanıyoruz (market + %1 tolerans)
+    def place_bracket_buy(self, symbol: str, notional: float, price: float, sl_price: float, tp_price: float):
+        """
+        Bracket market order — borsa sunucusu SL/TP'yi yönetir.
+        Alpaca bracket order notional desteklemediği için qty hesaplanır:
+          qty = notional / güncel_fiyat (2 ondalık basamak)
+        """
+        qty = max(1, int(notional / price))  # Bracket order tam sayı gerektiriyor
         req = MarketOrderRequest(
             symbol=symbol,
-            notional=round(notional, 2),
+            qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
@@ -211,8 +217,8 @@ def get_technical_score(ticker: str) -> dict:
             log.warning(f"{ticker}: Yetersiz günlük veri")
             return result
 
-        ema50  = ta.ema(daily["close"], length=50)
-        ema200 = ta.ema(daily["close"], length=200)
+        ema50  = ta.trend.ema_indicator(daily["close"], window=50)
+        ema200 = ta.trend.ema_indicator(daily["close"], window=200)
 
         if ema50 is None or ema200 is None:
             log.warning(f"{ticker}: EMA hesaplanamadı")
@@ -243,13 +249,17 @@ def get_technical_score(ticker: str) -> dict:
             result["tech_score"] = daily_score * 0.40 + 50 * 0.30 + 50 * 0.30
             return result
 
-        rsi_series = ta.rsi(hourly["close"], length=14)
-        macd_df    = ta.macd(hourly["close"], fast=12, slow=26, signal=9)
-        atr_series = ta.atr(hourly["high"], hourly["low"], hourly["close"], length=14)
+        rsi_series = ta.momentum.rsi(hourly["close"], window=14)
+        macd_ind   = ta.trend.MACD(hourly["close"], window_fast=12, window_slow=26, window_sign=9)
+        macd_line  = macd_ind.macd()
+        macd_sig   = macd_ind.macd_signal()
+        macd_hist  = macd_ind.macd_diff()
 
-        # ATR (daily üzerinden de hesapla)
-        daily_atr = ta.atr(daily["high"], daily["low"], daily["close"], length=14)
-        if daily_atr is not None and not daily_atr.empty:
+        # ATR (daily üzerinden hesapla)
+        daily_atr = ta.volatility.AverageTrueRange(
+            daily["high"], daily["low"], daily["close"], window=14
+        ).average_true_range()
+        if daily_atr is not None and not daily_atr.dropna().empty:
             result["atr"] = float(daily_atr.iloc[-1])
 
         if rsi_series is None or rsi_series.dropna().empty:
@@ -273,43 +283,35 @@ def get_technical_score(ticker: str) -> dict:
             else:
                 rsi_score = 40 + rsi_val * 0.3
 
-        if macd_df is None or macd_df.empty:
+        if macd_line is None or macd_line.dropna().empty:
             macd_score = 45.0
             macd_dir   = "—"
         else:
-            macd_col   = [c for c in macd_df.columns if c.startswith("MACD_")]
-            sig_col    = [c for c in macd_df.columns if c.startswith("MACDs_")]
-            hist_col   = [c for c in macd_df.columns if c.startswith("MACDh_")]
+            macd_v  = float(macd_line.iloc[-1])
+            sig_v   = float(macd_sig.iloc[-1])
+            hist_v  = float(macd_hist.iloc[-1])
+            hist_p  = float(macd_hist.iloc[-2]) if len(macd_hist) >= 2 else hist_v
 
-            if not macd_col or not sig_col or not hist_col:
-                macd_score = 45.0
-                macd_dir   = "—"
+            hist_growing = abs(hist_v) > abs(hist_p)
+
+            if macd_v > sig_v and hist_v > 0 and hist_growing:
+                macd_score = 100
+                macd_dir   = "↑↑ güçlü"
+            elif macd_v > sig_v and hist_v > 0:
+                macd_score = 75
+                macd_dir   = "↑ yükseliş"
+            elif macd_v > sig_v and hist_v < 0:
+                macd_score = 55
+                macd_dir   = "↗ zayıf"
+            elif macd_v < sig_v and hist_v < 0 and hist_growing:
+                macd_score = 0
+                macd_dir   = "↓↓ güçlü düşüş"
+            elif macd_v < sig_v and hist_v < 0:
+                macd_score = 25
+                macd_dir   = "↓ düşüş"
             else:
-                macd_v  = float(macd_df[macd_col[0]].iloc[-1])
-                sig_v   = float(macd_df[sig_col[0]].iloc[-1])
-                hist_v  = float(macd_df[hist_col[0]].iloc[-1])
-                hist_p  = float(macd_df[hist_col[0]].iloc[-2]) if len(macd_df) >= 2 else hist_v
-
-                hist_growing = abs(hist_v) > abs(hist_p)
-
-                if macd_v > sig_v and hist_v > 0 and hist_growing:
-                    macd_score = 100
-                    macd_dir   = "↑↑ güçlü"
-                elif macd_v > sig_v and hist_v > 0:
-                    macd_score = 75
-                    macd_dir   = "↑ yükseliş"
-                elif macd_v > sig_v and hist_v < 0:
-                    macd_score = 55
-                    macd_dir   = "↗ zayıf"
-                elif macd_v < sig_v and hist_v < 0 and hist_growing:
-                    macd_score = 0
-                    macd_dir   = "↓↓ güçlü düşüş"
-                elif macd_v < sig_v and hist_v < 0:
-                    macd_score = 25
-                    macd_dir   = "↓ düşüş"
-                else:
-                    macd_score = 45
-                    macd_dir   = "— kararsız"
+                macd_score = 45
+                macd_dir   = "— kararsız"
 
         result["rsi_score"]  = rsi_score
         result["macd_score"] = macd_score
@@ -467,7 +469,7 @@ def should_buy(
     positions: list,
     portfolio_value: float,
     buying_power: float,
-    atr: float | None,
+    atr: Optional[float],
 ) -> tuple[bool, str]:
     """Alım koşullarını sırayla kontrol eder."""
     global BOT_PAUSED
@@ -501,7 +503,7 @@ def place_bracket_buy(
     tp_price   = price + ATR_TP_MULT * atr
 
     try:
-        order = engine.place_bracket_buy(ticker, notional, sl_price, tp_price)
+        order = engine.place_bracket_buy(ticker, notional, price, sl_price, tp_price)
         msg = (
             f"✅ Bracket Buy: {ticker} | "
             f"Notional=${notional:.0f} | "
@@ -706,14 +708,21 @@ def start_telegram_bot(engine: AlpacaEngine) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+        async def on_error(update, context):
+            if isinstance(context.error, Conflict):
+                log.warning("Telegram 409 Conflict: başka bir instance çalışıyor, yeniden deneniyor...")
+            else:
+                log.error(f"Telegram hatası: {context.error}")
+
         app = ApplicationBuilder().token(TG_TOKEN).build()
         app.add_handler(CommandHandler("durum",   cmd_durum))
         app.add_handler(CommandHandler("portfoy", cmd_portfoy))
         app.add_handler(CommandHandler("durdur",  cmd_durdur))
         app.add_handler(CommandHandler("baslat",  cmd_baslat))
+        app.add_error_handler(on_error)
 
         log.info("Telegram bot dinlemeye başladı.")
-        app.run_polling(stop_signals=None)
+        app.run_polling(stop_signals=None, drop_pending_updates=True)
 
     t = threading.Thread(target=thread_main, daemon=True)
     t.start()
@@ -721,14 +730,20 @@ def start_telegram_bot(engine: AlpacaEngine) -> None:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true",
+                        help="Tek tarama yap ve çık (GitHub Actions modu)")
+    args = parser.parse_args()
+
     log.info("=" * 55)
     log.info("  Kanka Sinyal Botu v4.0 başlatılıyor...")
+    log.info(f"  Mod: {'--once (GitHub Actions)' if args.once else 'sürekli (VPS)'}")
     log.info("=" * 55)
 
     # API key kontrolü
     for key, val in [("ALPACA_API_KEY", ALPACA_API_KEY), ("ALPACA_SECRET_KEY", ALPACA_SECRET_KEY)]:
         if val in ("", "BURAYA_YAZ"):
-            log.error(f"{key} tanımlı değil. config.env dosyasını doldurun.")
+            log.error(f"{key} tanımlı değil.")
             sys.exit(1)
 
     engine = AlpacaEngine()
@@ -743,33 +758,46 @@ def main() -> None:
         log.error(f"Alpaca bağlantısı başarısız: {e}")
         sys.exit(1)
 
-    start_telegram_bot(engine)
+    # GitHub Actions modunda Telegram polling başlatılmaz
+    # (tg_send() ile bildirimler yine de gider)
+    if not args.once:
+        start_telegram_bot(engine)
+        tg_send(
+            f"🚀 <b>Kanka Sinyal Botu v4.0 başlatıldı</b>\n"
+            f"Mod: {engine.mod}\n"
+            f"Hisseler: {', '.join(TICKERS)}\n"
+            f"Tarama aralığı: {SCAN_INTERVAL} dakika"
+        )
 
-    tg_send(
-        f"🚀 <b>Kanka Sinyal Botu v4.0 başlatıldı</b>\n"
-        f"Mod: {engine.mod}\n"
-        f"Hisseler: {', '.join(TICKERS)}\n"
-        f"Tarama aralığı: {SCAN_INTERVAL} dakika"
-    )
+    if args.once:
+        # ── GitHub Actions modu: tek tarama, çık ──────────────────────────
+        log.info("GitHub Actions modu: tek tarama başlıyor...")
+        try:
+            scan_once(engine)
+        except Exception as e:
+            log.error(f"Tarama hatası: {e}")
+            tg_send(f"⚠️ GitHub Actions tarama hatası: {e}")
+            sys.exit(1)
+        log.info("Tarama tamamlandı, çıkılıyor.")
+    else:
+        # ── VPS modu: sonsuz döngü ─────────────────────────────────────────
+        log.info(f"Tarama aralığı: {SCAN_INTERVAL} dakika")
+        try:
+            while True:
+                try:
+                    scan_once(engine)
+                except Exception as e:
+                    log.error(f"Beklenmedik hata: {e}")
+                    tg_send(f"⚠️ Bot hatası: {e}\n5 dakika bekleniyor...")
+                    time.sleep(300)
+                    continue
 
-    log.info(f"Tarama aralığı: {SCAN_INTERVAL} dakika")
+                log.info(f"Sonraki tarama {SCAN_INTERVAL} dakika sonra...")
+                time.sleep(SCAN_INTERVAL * 60)
 
-    try:
-        while True:
-            try:
-                scan_once(engine)
-            except Exception as e:
-                log.error(f"Beklenmedik hata: {e}")
-                tg_send(f"⚠️ Bot hatası: {e}\n5 dakika bekleniyor...")
-                time.sleep(300)
-                continue
-
-            log.info(f"Sonraki tarama {SCAN_INTERVAL} dakika sonra...")
-            time.sleep(SCAN_INTERVAL * 60)
-
-    except KeyboardInterrupt:
-        log.info("Bot kullanıcı tarafından durduruldu.")
-        tg_send("🛑 Kanka Sinyal Botu durduruldu.")
+        except KeyboardInterrupt:
+            log.info("Bot kullanıcı tarafından durduruldu.")
+            tg_send("🛑 Kanka Sinyal Botu durduruldu.")
 
 
 if __name__ == "__main__":
