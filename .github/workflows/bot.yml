@@ -50,6 +50,13 @@ jobs:
           SCAN_INTERVAL_MINUTES=60
           EOF
 
+      - name: Commit ve kod dogrulama
+        run: |
+          echo "=== AKTIF COMMIT ==="
+          git log --oneline -1
+          echo "=== BOT.PY EMA SATIRI ==="
+          grep -n "ewm\|ema_indicator\|EMA" bot.py | head -20
+
       - name: Ortam ve veri debug
         run: |
           python - << 'PYEOF'
