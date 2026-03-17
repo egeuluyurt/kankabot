@@ -191,14 +191,14 @@ def is_market_hours() -> bool:
 
 # ─── Teknik Analiz ────────────────────────────────────────────────────────────
 def _download_fix(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """MultiIndex düzeltmeli yfinance indirme."""
-    df = yf.download(ticker, period=period, interval=interval,
-                     auto_adjust=True, progress=False)
+    """
+    yf.Ticker().history() ile veri indirir — MultiIndex sorunu yok.
+    Sütun isimleri küçük harfe çevrilir.
+    """
+    t = yf.Ticker(ticker)
+    df = t.history(period=period, interval=interval, auto_adjust=True)
     if df.empty:
         return df
-    if hasattr(df.columns, "levels"):
-        df.columns = df.columns.get_level_values(0)
-    # Sütun isimlerini küçük harfe çevir
     df.columns = [c.lower() for c in df.columns]
     return df
 
