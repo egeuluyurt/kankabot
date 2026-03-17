@@ -1,0 +1,22 @@
+[Unit]
+Description=Kanka Sinyal Botu v4.0
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kankabot
+WorkingDirectory=/opt/kanka-bot
+ExecStart=/opt/kanka-bot/venv/bin/python /opt/kanka-bot/bot.py
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+# Güvenlik sıkılaştırma
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/kanka-bot
+
+[Install]
+WantedBy=multi-user.target

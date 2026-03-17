@@ -1,11 +1,9 @@
-# ── Veri Çekme ──────────────────────────────────────────────
-yfinance>=0.2.54          # 429 hatası düzeltilmiş sürüm
+alpaca-py==0.38.0
+yfinance==1.2.0
 pandas==2.2.3
-pandas-ta==0.3.14b0       # Teknik analiz (RSI, MACD, EMA)
-
-# ── Sentiment ───────────────────────────────────────────────
-vaderSentiment==3.3.2    # Bağlam anlayan NLP (keyword yerine)
-
-# ── Yardımcı ────────────────────────────────────────────────
+pandas-ta==0.3.14b0
+vaderSentiment==3.3.2
+python-telegram-bot==21.11.1
+tenacity==9.0.0
 requests==2.32.3
 python-dotenv==1.0.1
