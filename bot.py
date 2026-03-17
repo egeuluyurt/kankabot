@@ -217,8 +217,8 @@ def get_technical_score(ticker: str) -> dict:
     }
     try:
         # ── Günlük filtre ─────────────────────────────────────────────────
-        daily = _download_fix(ticker, "8mo", "1d")
-        if daily.empty or len(daily) < 50:
+        daily = _download_fix(ticker, "2y", "1d")
+        if daily.empty or len(daily) < 200:
             log.warning(f"{ticker}: Yetersiz günlük veri")
             return result
 
