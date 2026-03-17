@@ -27,10 +27,15 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
+    LimitOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
+    ReplaceOrderRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderType
+
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest
 
 from telegram import Update
 from telegram.error import Conflict
@@ -138,6 +143,7 @@ class AlpacaEngine:
             ALPACA_SECRET_KEY,
             paper=PAPER_TRADING,
         )
+        self.data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         self.mod = "PAPER" if PAPER_TRADING else "LIVE"
 
     @retry_on_rate_limit
@@ -148,24 +154,65 @@ class AlpacaEngine:
     def get_positions(self):
         return self.client.get_all_positions()
 
+    def get_mid_price(self, symbol: str) -> Optional[float]:
+        """Gerçek zamanlı bid/ask ortasını döndürür. Başarısız olursa None."""
+        try:
+            req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+            quote = self.data_client.get_stock_latest_quote(req)
+            bid = float(quote[symbol].bid_price)
+            ask = float(quote[symbol].ask_price)
+            if bid > 0 and ask > 0:
+                return round((bid + ask) / 2, 2)
+        except Exception as e:
+            log.warning(f"{symbol} mid-price alınamadı: {e}")
+        return None
+
     @retry_on_rate_limit
     def place_bracket_buy(self, symbol: str, notional: float, price: float, sl_price: float, tp_price: float):
         """
-        Bracket market order — borsa sunucusu SL/TP'yi yönetir.
-        Alpaca bracket order notional desteklemediği için qty hesaplanır:
-          qty = notional / güncel_fiyat (2 ondalık basamak)
+        Bracket limit order — giriş fiyatı mid-point (bid/ask ortası).
+        Alpaca bracket order notional desteklemediği için qty hesaplanır.
         """
         qty = max(1, int(notional / price))  # Bracket order tam sayı gerektiriyor
-        req = MarketOrderRequest(
+        req = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
+            limit_price=round(price, 2),
             order_class=OrderClass.BRACKET,
             stop_loss=StopLossRequest(stop_price=round(sl_price, 2)),
             take_profit=TakeProfitRequest(limit_price=round(tp_price, 2)),
         )
         return self.client.submit_order(req)
+
+    def replace_order(self, order_id: str, new_limit: float) -> bool:
+        """
+        Açık limit emrinin giriş fiyatını günceller.
+        422 'order parameters are not changed' hatasını tolere eder.
+        """
+        try:
+            req = ReplaceOrderRequest(limit_price=round(new_limit, 2))
+            self.client.replace_order_by_id(order_id, req)
+            return True
+        except Exception as e:
+            err_str = str(e)
+            if "422" in err_str or "order parameters are not changed" in err_str.lower():
+                log.info(f"Emir güncellenmedi (parametreler değişmedi): {order_id}")
+                return True  # Hata değil, parametre aynı
+            log.error(f"Emir güncelleme hatası ({order_id}): {e}")
+            return False
+
+    def cancel_all_orders(self) -> int:
+        """Tüm açık emirleri iptal eder. İptal edilen emir sayısını döndürür."""
+        try:
+            cancelled = self.client.cancel_orders()
+            count = len(cancelled) if cancelled else 0
+            log.info(f"Kapanış öncesi {count} açık emir iptal edildi.")
+            return count
+        except Exception as e:
+            log.error(f"Emir iptali hatası: {e}")
+            return 0
 
     @retry_on_rate_limit
     def place_sell(self, symbol: str, notional: float):
@@ -188,6 +235,15 @@ def is_market_hours() -> bool:
     open_time  = ny.replace(hour=9,  minute=30, second=0, microsecond=0)
     close_time = ny.replace(hour=16, minute=0,  second=0, microsecond=0)
     return open_time <= ny <= close_time
+
+def _is_near_close() -> bool:
+    """NYSE kapanışına 5 dakika veya daha az kaldı mı? (weekday 15:55–16:00 ET)"""
+    ny = datetime.now(ZoneInfo("America/New_York"))
+    if ny.weekday() >= 5:
+        return False
+    close_time = ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    seconds_to_close = (close_time - ny).total_seconds()
+    return 0 <= seconds_to_close <= 300  # Kapanışa 0–5 dakika kaldı
 
 # ─── Teknik Analiz ────────────────────────────────────────────────────────────
 def _download_fix(ticker: str, period: str, interval: str) -> pd.DataFrame:
@@ -504,15 +560,22 @@ def place_bracket_buy(
     price: float,
     atr: float,
 ) -> str:
-    """Bracket buy emri gönderir. Sonucu string olarak döndürür."""
-    notional   = portfolio_value * POSITION_PCT / 100
-    sl_price   = price - ATR_SL_MULT * atr
-    tp_price   = price + ATR_TP_MULT * atr
+    """Bracket limit-buy emri gönderir. Giriş fiyatı mid-point (bid/ask ortası)."""
+    notional = portfolio_value * POSITION_PCT / 100
+
+    # Gerçek zamanlı mid-point al; başarısız olursa teknik analiz fiyatını kullan
+    mid = engine.get_mid_price(ticker)
+    entry_price = mid if mid else price
+    log.info(f"{ticker} giriş fiyatı: mid={mid} → entry={entry_price:.2f}")
+
+    sl_price = entry_price - ATR_SL_MULT * atr
+    tp_price = entry_price + ATR_TP_MULT * atr
 
     try:
-        order = engine.place_bracket_buy(ticker, notional, price, sl_price, tp_price)
+        order = engine.place_bracket_buy(ticker, notional, entry_price, sl_price, tp_price)
         msg = (
-            f"✅ Bracket Buy: {ticker} | "
+            f"✅ Bracket Limit Buy: {ticker} | "
+            f"Limit=${entry_price:.2f} | "
             f"Notional=${notional:.0f} | "
             f"SL={sl_price:.2f} | TP={tp_price:.2f}"
         )
@@ -544,6 +607,15 @@ def scan_once(engine: AlpacaEngine) -> None:
     global BOT_PAUSED
     if BOT_PAUSED:
         log.info("Bot duraklatıldı, tarama atlandı.")
+        return
+
+    # ── Kapanış yakınsa emirleri iptal et, taramayı atla ─────────────────────
+    if _is_near_close():
+        log.info("NYSE kapanışına 5 dakika kaldı — açık emirler iptal ediliyor.")
+        count = engine.cancel_all_orders()
+        if count > 0:
+            tg_send(f"⏰ NYSE kapanışına yakın: {count} açık limit emir iptal edildi.")
+        log.info("Kapanış öncesi tarama atlandı.")
         return
 
     try:
