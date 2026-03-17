@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10          # 10 dakikadan uzun sürerse iptal et
 
+    permissions:
+      contents: write           # Repo'ya geri yazabilmek için (history kaydı)
+
     steps:
       # 1. Repo'yu çek
       - name: 📥 Repo'yu çek
@@ -30,10 +33,6 @@ jobs:
       # 4. Botu çalıştır (tek seferlik --once modu)
       - name: 🚀 Botu çalıştır
         env:
-          REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-          REDDIT_USERNAME:      ${{ secrets.REDDIT_USERNAME }}
-          REDDIT_PASSWORD:      ${{ secrets.REDDIT_PASSWORD }}
           FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}

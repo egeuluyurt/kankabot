@@ -20,10 +20,6 @@ from dotenv import load_dotenv
 # ── Ortam değişkenleri ───────────────────────────────────────
 load_dotenv("config.env")
 
-REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USERNAME      = os.getenv("REDDIT_USERNAME", "")
-REDDIT_PASSWORD      = os.getenv("REDDIT_PASSWORD", "")
 FINNHUB_API_KEY      = os.getenv("FINNHUB_API_KEY", "")
 TELEGRAM_TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "")
