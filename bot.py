@@ -222,20 +222,17 @@ def get_technical_score(ticker: str) -> dict:
             log.warning(f"{ticker}: Yetersiz günlük veri ({len(daily)} bar)")
             return result
 
-        # NaN satırları temizle, EMA hesabının bozulmasını önle
+        # NaN satırları temizle
         close = daily["close"].ffill().dropna()
         log.info(f"{ticker}: {len(close)} günlük bar yüklendi")
 
-        ema50  = ta.trend.ema_indicator(close, window=50)
-        ema200 = ta.trend.ema_indicator(close, window=200)
-
-        if ema50 is None or ema200 is None:
-            log.warning(f"{ticker}: EMA hesaplanamadı")
-            return result
+        # pandas ewm ile EMA — min_periods=0 ile her zaman değer döner
+        ema50_series  = close.ewm(span=50,  adjust=False, min_periods=0).mean()
+        ema200_series = close.ewm(span=200, adjust=False, min_periods=0).mean()
 
         price    = float(close.iloc[-1])
-        ema50_v  = float(ema50.iloc[-1])
-        ema200_v = float(ema200.iloc[-1])
+        ema50_v  = float(ema50_series.iloc[-1])
+        ema200_v = float(ema200_series.iloc[-1])
         log.info(f"{ticker}: Fiyat={price:.2f} EMA50={ema50_v:.2f} EMA200={ema200_v:.2f}")
         result["price"]  = price
         result["ema200"] = ema200_v
