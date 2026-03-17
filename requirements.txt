@@ -1,7 +1,7 @@
 # ── Veri Çekme ──────────────────────────────────────────────
-yfinance==1.2.0          # v0.2.54'ün 429 hatası bu sürümde düzeltildi
+yfinance>=0.2.54          # 429 hatası düzeltilmiş sürüm
 pandas==2.2.3
-pandas-ta==0.3.14b       # Teknik analiz (RSI, MACD, EMA)
+pandas-ta==0.3.14b0       # Teknik analiz (RSI, MACD, EMA)
 
 # ── Sentiment ───────────────────────────────────────────────
 vaderSentiment==3.3.2    # Bağlam anlayan NLP (keyword yerine)
