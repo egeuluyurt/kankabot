@@ -112,16 +112,21 @@ retry_on_rate_limit = retry(
 
 # ─── Telegram (senkron fallback) ──────────────────────────────────────────────
 def tg_send(text: str) -> None:
-    """Telegram'a senkron mesaj gönderir. Hata olursa sadece loglar."""
+    """Telegram'a senkron mesaj gönderir. Hata olursa loglar."""
     if not TG_TOKEN or not TG_CHAT_ID:
+        log.warning("Telegram: TG_TOKEN veya TG_CHAT_ID tanımlı değil, mesaj atlandı.")
         return
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        requests.post(
+        resp = requests.post(
             url,
             json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
+        if not resp.ok:
+            log.warning(f"Telegram API hatası {resp.status_code}: {resp.text}")
+        else:
+            log.info(f"Telegram mesajı gönderildi (chat_id={TG_CHAT_ID})")
     except Exception as e:
         log.warning(f"Telegram gönderme hatası: {e}")
 
