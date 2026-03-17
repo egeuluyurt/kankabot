@@ -50,42 +50,6 @@ jobs:
           SCAN_INTERVAL_MINUTES=60
           EOF
 
-      - name: Commit ve kod dogrulama
-        run: |
-          echo "=== AKTIF COMMIT ==="
-          git log --oneline -1
-          echo "=== BOT.PY EMA SATIRI ==="
-          grep -n "ewm\|ema_indicator\|EMA" bot.py | head -20
-
-      - name: Ortam ve veri debug
-        run: |
-          python - << 'PYEOF'
-          import sys, pandas as pd, yfinance as yf
-
-          print(f"=== ORTAM ===")
-          print(f"Python  : {sys.version}")
-          print(f"pandas  : {pd.__version__}")
-          print(f"yfinance: {yf.__version__}")
-
-          print(f"\n=== VERİ TESTİ (TSLA, 2y, 1d) ===")
-          t = yf.Ticker("TSLA")
-          df = t.history(period="2y", interval="1d", auto_adjust=True)
-          df.columns = [c.lower() for c in df.columns]
-
-          print(f"df.shape         : {df.shape}")
-          print(f"Ham close NaN    : {df['close'].isna().sum()} / {len(df)}")
-          print(f"Son ham değer    : {df['close'].iloc[-1]:.4f}")
-
-          close = df["close"].ffill().dropna()
-          print(f"ffill+dropna len : {len(close)}")
-          print(f"Temiz close NaN  : {close.isna().sum()}")
-          print(f"Son temiz değer  : {close.iloc[-1]:.4f}")
-
-          ewm = close.ewm(span=200, adjust=False, min_periods=0).mean()
-          print(f"EWM(200) son 3   : {ewm.tail(3).tolist()}")
-          print(f"EWM NaN sayısı   : {ewm.isna().sum()}")
-          PYEOF
-
       - name: Botu çalıştır
         run: python bot.py --once
 
