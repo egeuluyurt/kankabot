@@ -219,19 +219,24 @@ def get_technical_score(ticker: str) -> dict:
         # ── Günlük filtre ─────────────────────────────────────────────────
         daily = _download_fix(ticker, "2y", "1d")
         if daily.empty or len(daily) < 200:
-            log.warning(f"{ticker}: Yetersiz günlük veri")
+            log.warning(f"{ticker}: Yetersiz günlük veri ({len(daily)} bar)")
             return result
 
-        ema50  = ta.trend.ema_indicator(daily["close"], window=50)
-        ema200 = ta.trend.ema_indicator(daily["close"], window=200)
+        # NaN satırları temizle, EMA hesabının bozulmasını önle
+        close = daily["close"].ffill().dropna()
+        log.info(f"{ticker}: {len(close)} günlük bar yüklendi")
+
+        ema50  = ta.trend.ema_indicator(close, window=50)
+        ema200 = ta.trend.ema_indicator(close, window=200)
 
         if ema50 is None or ema200 is None:
             log.warning(f"{ticker}: EMA hesaplanamadı")
             return result
 
-        price    = float(daily["close"].iloc[-1])
+        price    = float(close.iloc[-1])
         ema50_v  = float(ema50.iloc[-1])
         ema200_v = float(ema200.iloc[-1])
+        log.info(f"{ticker}: Fiyat={price:.2f} EMA50={ema50_v:.2f} EMA200={ema200_v:.2f}")
         result["price"]  = price
         result["ema200"] = ema200_v
 
