@@ -136,15 +136,18 @@ def get_llm_sentiment_analysis(ticker: str) -> Optional[float]:
     """
     Haber başlıklarını LLM ile analiz eder (opsiyonel).
 
-    OPENAI_API_KEY tanımlıysa → OpenAI gpt-4o-mini kullanır.
-    Tanımlı değilse → None döner (composite_score eski ağırlığa geri döner).
+    Öncelik sırası:
+      1. GEMINI_API_KEY varsa → Google Gemini 1.5 Flash (ücretsiz tier mevcut)
+      2. OPENAI_API_KEY varsa → OpenAI gpt-4o-mini
+      3. İkisi de yoksa     → None (composite_score insider-only çalışır)
 
     Döndürür: 0–100 float veya None
     """
+    gemini_key  = os.getenv("GEMINI_API_KEY", "")
     openai_key  = os.getenv("OPENAI_API_KEY", "")
     finnhub_key = os.getenv("FINNHUB_API_KEY", "")
 
-    if not openai_key:
+    if not gemini_key and not openai_key:
         return None  # LLM devre dışı
 
     # Finnhub'dan son 7 günün haber başlıklarını çek
@@ -172,36 +175,59 @@ def get_llm_sentiment_analysis(ticker: str) -> Optional[float]:
     if not headlines:
         return None
 
-    # OpenAI API çağrısı (requests ile — openai paketi gerekmez)
-    try:
-        headlines_text = "\n".join(f"- {h}" for h in headlines)
-        prompt = (
-            f"{ticker} hissesi için aşağıdaki haber başlıklarını yatırımcı "
-            f"duyarlılığı açısından analiz et. "
-            f"0 (çok negatif) ile 100 (çok pozitif) arasında SADECE bir tam sayı "
-            f"döndür, başka hiçbir şey yazma.\n\n{headlines_text}"
-        )
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {openai_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 5,
-                "temperature": 0,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        raw   = resp.json()["choices"][0]["message"]["content"].strip()
-        score = float(raw)
-        score = max(0.0, min(score, 100.0))
-        log.info(f"{ticker} LLM sentiment: {score:.0f} ({len(headlines)} haber)")
-        return score
+    headlines_text = "\n".join(f"- {h}" for h in headlines)
+    prompt = (
+        f"{ticker} hissesi için aşağıdaki haber başlıklarını yatırımcı "
+        f"duyarlılığı açısından analiz et. "
+        f"0 (çok negatif) ile 100 (çok pozitif) arasında SADECE bir tam sayı "
+        f"döndür, başka hiçbir şey yazma.\n\n{headlines_text}"
+    )
 
-    except Exception as e:
-        log.warning(f"{ticker} LLM sentiment hatası: {e}")
-        return None
+    # ── 1. Gemini 1.5 Flash (öncelikli) ──────────────────────────────────────
+    if gemini_key:
+        try:
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models"
+                f"/gemini-1.5-flash:generateContent?key={gemini_key}"
+            )
+            resp = requests.post(
+                url,
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw   = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            score = float(raw)
+            score = max(0.0, min(score, 100.0))
+            log.info(f"{ticker} Gemini sentiment: {score:.0f} ({len(headlines)} haber)")
+            return score
+        except Exception as e:
+            log.warning(f"{ticker} Gemini sentiment hatası: {e} — OpenAI'ya düşülüyor")
+
+    # ── 2. OpenAI gpt-4o-mini (fallback) ─────────────────────────────────────
+    if openai_key:
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 5,
+                    "temperature": 0,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw   = resp.json()["choices"][0]["message"]["content"].strip()
+            score = float(raw)
+            score = max(0.0, min(score, 100.0))
+            log.info(f"{ticker} OpenAI sentiment: {score:.0f} ({len(headlines)} haber)")
+            return score
+        except Exception as e:
+            log.warning(f"{ticker} OpenAI sentiment hatası: {e}")
+
+    return None
