@@ -39,6 +39,11 @@ from alpaca.data.requests import StockLatestQuoteRequest
 
 from regime import detect_regime, MarketRegime
 from sizing import calculate_position_size
+from alternative_data import (
+    get_insider_sentiment,
+    get_economic_calendar,
+    get_llm_sentiment_analysis,
+)
 
 from telegram import Update
 from telegram.error import Conflict
@@ -518,10 +523,32 @@ def get_finnhub_score(ticker: str) -> float:
 
 
 # ─── Bileşik Skor & Sinyal ────────────────────────────────────────────────────
-def composite_score(tech: float, reddit: float, finnhub: float) -> tuple[float, float, float]:
-    """(final_score, tech_score, sentiment_score) döndürür."""
+def composite_score(
+    tech: float,
+    reddit: float,
+    finnhub: float,
+    insider: float = 50.0,
+    llm_score: Optional[float] = None,
+) -> tuple[float, float, float]:
+    """
+    (final_score, tech_score, sentiment_score) döndürür.
+
+    Ağırlıklar:
+      Teknik       : %50
+      Sentiment    : %20  (reddit + finnhub)
+      Alternatif   : %30  (insider + LLM)
+
+    LLM skoru yoksa alternatif = insider (tek başına %30).
+    """
     sentiment = reddit * 0.50 + finnhub * 0.50
-    final     = tech * 0.60 + sentiment * 0.40
+
+    # Alternatif veri: insider + LLM (LLM opsiyonel)
+    if llm_score is not None:
+        alt_score = insider * 0.50 + llm_score * 0.50
+    else:
+        alt_score = insider
+
+    final = tech * 0.50 + sentiment * 0.20 + alt_score * 0.30
     return final, tech, sentiment
 
 def confidence_level(tech: float, sentiment: float) -> str:
@@ -659,6 +686,12 @@ def scan_once(engine: AlpacaEngine) -> None:
         f"Nakit: ${buying_power:.0f} | Açık pozisyon: {len(active_tickers)}"
     )
 
+    # ── Ekonomik takvim — tarama başında bir kez kontrol edilir ──────────────
+    eco_risk, eco_event = get_economic_calendar()
+    if eco_risk:
+        log.warning(f"Ekonomik risk flag aktif: {eco_event}")
+        tg_send(f"⚠️ <b>Ekonomik Olay Uyarısı</b>\n{eco_event}\nBugün yeni pozisyon açılmayacak.")
+
     for ticker in TICKERS:
         try:
             log.info(f"─── {ticker} analiz ediliyor...")
@@ -666,9 +699,11 @@ def scan_once(engine: AlpacaEngine) -> None:
             tech_data  = get_technical_score(ticker)
             reddit_s   = get_apewisdom_score(ticker)
             finnhub_s  = get_finnhub_score(ticker)
+            insider_s  = get_insider_sentiment(ticker)
+            llm_s      = get_llm_sentiment_analysis(ticker)
 
             final, tech_s, sentiment_s = composite_score(
-                tech_data["tech_score"], reddit_s, finnhub_s
+                tech_data["tech_score"], reddit_s, finnhub_s, insider_s, llm_s
             )
             conf   = confidence_level(tech_s, sentiment_s)
             signal = signal_label(final, conf)
@@ -681,10 +716,16 @@ def scan_once(engine: AlpacaEngine) -> None:
             action_msg = "İşlem yapılmadı"
 
             if "AL" in signal and is_market_hours():
-                ok, reason = should_buy(
-                    ticker, positions, portfolio_val, buying_power,
-                    tech_data["atr"], tech_data.get("regime", MarketRegime.UNKNOWN)
-                )
+                if eco_risk:
+                    action_msg = f"Alım engellendi: Ekonomik olay ({eco_event})"
+                    ok = False
+                else:
+                    ok, reason = should_buy(
+                        ticker, positions, portfolio_val, buying_power,
+                        tech_data["atr"], tech_data.get("regime", MarketRegime.UNKNOWN)
+                    )
+                    if not ok:
+                        action_msg = f"Alım engellendi: {reason}"
                 if ok:
                     action_msg = place_bracket_buy(
                         engine, ticker, portfolio_val,
@@ -692,8 +733,6 @@ def scan_once(engine: AlpacaEngine) -> None:
                     )
                     # Pozisyonu listeye ekle (cache için sahte nesne)
                     active_tickers.add(ticker)
-                else:
-                    action_msg = f"Alım engellendi: {reason}"
 
             elif "SAT" in signal and ticker in active_tickers and is_market_hours():
                 action_msg = place_sell(engine, ticker, portfolio_val)
@@ -703,7 +742,8 @@ def scan_once(engine: AlpacaEngine) -> None:
             if signal != "⏸ BEKLE":
                 _send_signal_message(
                     ticker, signal, final, conf, tech_data,
-                    reddit_s, finnhub_s, sentiment_s, action_msg, engine.mod
+                    reddit_s, finnhub_s, sentiment_s,
+                    insider_s, llm_s, action_msg, engine.mod
                 )
 
         except Exception as e:
@@ -715,7 +755,8 @@ def scan_once(engine: AlpacaEngine) -> None:
 
 def _send_signal_message(
     ticker, signal, final, conf, tech_data,
-    reddit_s, finnhub_s, sentiment_s, action_msg, mod
+    reddit_s, finnhub_s, sentiment_s,
+    insider_s, llm_s, action_msg, mod
 ) -> None:
     """Telegram'a sinyal bildirimi gönderir (HTML formatı)."""
     now = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
@@ -746,6 +787,10 @@ def _send_signal_message(
         f"<b>Sentiment ({sentiment_s:.1f}):</b>\n"
         f"  Reddit (ApeWisdom) : {reddit_s:.1f}\n"
         f"  Finnhub            : {finnhub_s:.1f}\n"
+        f"\n"
+        f"<b>Alternatif Veri:</b>\n"
+        f"  Insider            : {insider_s:.1f}\n"
+        f"  LLM                : {f'{llm_s:.1f}' if llm_s is not None else 'devre dışı'}\n"
         f"\n"
         f"<b>İşlem:</b> {action_msg}"
     )
