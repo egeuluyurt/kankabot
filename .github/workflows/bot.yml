@@ -33,22 +33,21 @@ jobs:
 
       - name: config.env oluştur
         run: |
-          cat > config.env << EOF
-          ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY=${{ secrets.ALPACA_SECRET_KEY }}
-          PAPER_TRADING=${{ secrets.PAPER_TRADING }}
-          FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}
-          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
-          TICKERS=AAPL,TSLA,NVDA,SPY,QQQ
-          BUY_THRESHOLD=65
-          SELL_THRESHOLD=35
-          POSITION_PCT=5
-          MAX_POSITIONS=3
-          ATR_SL_MULT=1.5
-          ATR_TP_MULT=3.0
-          SCAN_INTERVAL_MINUTES=60
-          EOF
+          echo "ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}" >> config.env
+          echo "ALPACA_SECRET_KEY=${{ secrets.ALPACA_SECRET_KEY }}" >> config.env
+          echo "PAPER_TRADING=${{ secrets.PAPER_TRADING }}" >> config.env
+          echo "FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}" >> config.env
+          echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> config.env
+          echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> config.env
+          echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> config.env
+          echo "TICKERS=AAPL,TSLA,NVDA,SPY,QQQ" >> config.env
+          echo "BUY_THRESHOLD=65" >> config.env
+          echo "SELL_THRESHOLD=35" >> config.env
+          echo "POSITION_PCT=5" >> config.env
+          echo "MAX_POSITIONS=3" >> config.env
+          echo "ATR_SL_MULT=1.5" >> config.env
+          echo "ATR_TP_MULT=3.0" >> config.env
+          echo "SCAN_INTERVAL_MINUTES=60" >> config.env
 
       - name: Botu çalıştır
         run: python bot.py --once
