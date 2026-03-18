@@ -33,8 +33,9 @@ from alpaca.trading.requests import (
     StopLossRequest,
     TakeProfitRequest,
     ReplaceOrderRequest,
+    GetOrdersRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderType
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderType, QueryOrderStatus
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
@@ -80,6 +81,10 @@ MAX_POSITIONS     = int(os.getenv("MAX_POSITIONS", "3"))
 ATR_SL_MULT       = float(os.getenv("ATR_SL_MULT", "1.5"))
 ATR_TP_MULT       = float(os.getenv("ATR_TP_MULT", "3.0"))
 SCAN_INTERVAL     = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
+
+TRAILING_TRIGGER_PCT = 5.0   # Kâr >= %5 → SL'yi giriş fiyatına taşı (breakeven)
+TIME_STOP_DAYS       = 5     # 5 günden uzun açık kalan pozisyonu kapat
+EARLY_EXIT_PCT       = -7.0  # Zarar >= %-7 → SL beklenmeden piyasadan çık
 
 # ─── Global durum ─────────────────────────────────────────────────────────────
 BOT_PAUSED       = False
@@ -259,6 +264,42 @@ class AlpacaEngine:
         except Exception as e:
             log.error(f"Emir iptali hatası: {e}")
             return 0
+
+    def close_position(self, symbol: str) -> bool:
+        """Pozisyonu piyasa fiyatından kapatır; bağlı SL/TP emirleri iptal edilir."""
+        try:
+            self.client.close_position(symbol)
+            log.info(f"{symbol}: Pozisyon kapatıldı (close_position API)")
+            return True
+        except Exception as e:
+            log.error(f"{symbol} pozisyon kapatma hatası: {e}")
+            return False
+
+    def get_open_sell_orders(self, symbol: str) -> list:
+        """Bir sembol için açık satış emirlerini döndürür."""
+        try:
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                symbols=[symbol],
+            )
+            orders = self.client.get_orders(req)
+            return [o for o in orders if o.side == OrderSide.SELL]
+        except Exception as e:
+            log.warning(f"{symbol} açık emirler alınamadı: {e}")
+            return []
+
+    def update_stop_price(self, order_id: str, new_stop: float) -> bool:
+        """Açık stop emrinin tetikleme fiyatını günceller."""
+        try:
+            req = ReplaceOrderRequest(stop_price=round(new_stop, 2))
+            self.client.replace_order_by_id(order_id, req)
+            return True
+        except Exception as e:
+            err_str = str(e)
+            if "422" in err_str or "order parameters are not changed" in err_str.lower():
+                return True
+            log.error(f"Stop fiyatı güncelleme hatası ({order_id}): {e}")
+            return False
 
     @retry_on_rate_limit
     def place_sell(self, symbol: str, notional: float):
@@ -806,6 +847,106 @@ def place_sell(engine: AlpacaEngine, ticker: str, portfolio_value: float) -> str
         return msg
 
 
+# ─── Pozisyon Yönetimi ────────────────────────────────────────────────────────
+def morning_report(engine: AlpacaEngine) -> None:
+    """NYSE açılışı (09:30–09:44 ET) penceresinde açık pozisyon özetini gönderir."""
+    ny = datetime.now(ZoneInfo("America/New_York"))
+    if not (ny.hour == 9 and 30 <= ny.minute <= 44):
+        return
+    try:
+        positions = engine.get_positions()
+        if not positions:
+            tg_send("🌅 <b>Sabah Raporu</b>\nAçık pozisyon yok.")
+            return
+        lines = [f"🌅 <b>Sabah Raporu — {ny.strftime('%Y-%m-%d')}</b>"]
+        for p in positions:
+            entry   = float(p.avg_entry_price)
+            cur     = float(p.current_price)
+            pnl     = float(p.unrealized_pl)
+            pnl_pct = float(p.unrealized_plpc) * 100
+            market  = float(p.market_value)
+            lines.append(
+                f"\n<b>{p.symbol}</b>\n"
+                f"  Giriş  : ${entry:.2f} → Şimdi: ${cur:.2f}\n"
+                f"  Değer  : ${market:.2f}\n"
+                f"  K/Z    : ${pnl:+.2f} (%{pnl_pct:+.1f})"
+            )
+        tg_send("\n".join(lines))
+    except Exception as e:
+        log.error(f"Sabah raporu hatası: {e}")
+
+
+def manage_open_positions(engine: AlpacaEngine, positions: list) -> None:
+    """
+    Her taramada açık pozisyonları denetler:
+      1. Erken çıkış  : Zarar >= EARLY_EXIT_PCT%     → piyasa fiyatından kapat
+      2. Breakeven SL : Kâr   >= TRAILING_TRIGGER_PCT% → SL'yi giriş fiyatına taşı
+      3. Zaman durağı : Pozisyon >= TIME_STOP_DAYS gün açık → kapat
+    """
+    now_ny = datetime.now(ZoneInfo("America/New_York"))
+
+    for p in positions:
+        symbol  = p.symbol
+        entry   = float(p.avg_entry_price)
+        cur     = float(p.current_price)
+        pnl     = float(p.unrealized_pl)
+        pnl_pct = float(p.unrealized_plpc) * 100
+        market  = float(p.market_value)
+
+        try:
+            # ── 1. Erken çıkış ────────────────────────────────────────────────
+            if pnl_pct <= EARLY_EXIT_PCT:
+                log.warning(
+                    f"{symbol}: Erken çıkış — zarar %{pnl_pct:.1f} "
+                    f"(eşik %{EARLY_EXIT_PCT})"
+                )
+                if engine.close_position(symbol):
+                    tg_send(
+                        f"🚨 <b>Erken Çıkış — {symbol}</b>\n"
+                        f"Zarar %{pnl_pct:.1f} eşiği aştı (eşik %{EARLY_EXIT_PCT})\n"
+                        f"Giriş: ${entry:.2f} | Şimdi: ${cur:.2f}\n"
+                        f"Piyasa fiyatından kapatıldı."
+                    )
+                continue  # Diğer kontrolleri atla
+
+            # ── Açık satış emirlerini tek seferde çek (2 ve 3 için) ───────────
+            sell_orders = engine.get_open_sell_orders(symbol)
+
+            # ── 2. Breakeven trailing stop ────────────────────────────────────
+            if pnl_pct >= TRAILING_TRIGGER_PCT:
+                sl_orders = [o for o in sell_orders if o.order_type == OrderType.STOP]
+                if sl_orders:
+                    sl_order     = sl_orders[0]
+                    current_stop = float(sl_order.stop_price) if sl_order.stop_price else 0.0
+                    if current_stop < entry:
+                        if engine.update_stop_price(sl_order.id, entry):
+                            log.info(f"{symbol}: Breakeven SL güncellendi → ${entry:.2f}")
+                            tg_send(
+                                f"🔒 <b>Breakeven Stop — {symbol}</b>\n"
+                                f"Kâr %{pnl_pct:.1f} → SL giriş fiyatına taşındı\n"
+                                f"Yeni SL: ${entry:.2f}"
+                            )
+
+            # ── 3. Zaman durağı ───────────────────────────────────────────────
+            if sell_orders:
+                oldest    = min(sell_orders, key=lambda o: o.created_at)
+                tz_aware  = oldest.created_at.astimezone(ZoneInfo("America/New_York"))
+                days_held = (now_ny - tz_aware).days
+                if days_held >= TIME_STOP_DAYS:
+                    log.warning(f"{symbol}: Zaman durağı — {days_held} gün açık")
+                    if engine.close_position(symbol):
+                        tg_send(
+                            f"⏱ <b>Zaman Durağı — {symbol}</b>\n"
+                            f"{days_held} gündür açık, TP/SL tetiklenmedi\n"
+                            f"Giriş: ${entry:.2f} | Şimdi: ${cur:.2f}\n"
+                            f"K/Z: ${pnl:+.2f} (%{pnl_pct:+.1f})\n"
+                            f"Piyasa fiyatından kapatıldı."
+                        )
+
+        except Exception as e:
+            log.error(f"{symbol} pozisyon yönetimi hatası: {e}")
+
+
 # ─── Ana Tarama Döngüsü ───────────────────────────────────────────────────────
 def scan_once(engine: AlpacaEngine) -> None:
     """Tüm hisseleri bir kez tarar."""
@@ -837,6 +978,16 @@ def scan_once(engine: AlpacaEngine) -> None:
         f"Tarama başlıyor | Portföy: ${portfolio_val:.0f} | "
         f"Nakit: ${buying_power:.0f} | Açık pozisyon: {len(active_tickers)}"
     )
+
+    # ── Sabah raporu (09:30–09:44 ET) ────────────────────────────────────────
+    morning_report(engine)
+
+    # ── Açık pozisyonları yönet ───────────────────────────────────────────────
+    if positions and is_market_hours():
+        manage_open_positions(engine, positions)
+        # Erken çıkış / zaman durağı sonrası listeyi tazele
+        positions      = engine.get_positions()
+        active_tickers = {p.symbol for p in positions}
 
     # ── Makro veri — tarama başında bir kez çekilir ──────────────────────────
     macro_data       = get_fred_macro_data()
