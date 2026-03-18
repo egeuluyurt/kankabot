@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from fredapi import Fred
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,50 @@ _retry_alt = retry(
     stop=stop_after_attempt(5),
     reraise=True,
 )
+
+
+# ─── FRED Makro Veri ─────────────────────────────────────────────────────────
+def get_fred_macro_data() -> dict:
+    """
+    FRED API üzerinden makroekonomik göstergelerin en güncel değerlerini çeker.
+
+    Seriler:
+      VIXCLS   — VIX Volatilite Endeksi
+      DFF      — Günlük Federal Fon Oranı (%)
+      CPIAUCSL — Tüketici Fiyat Endeksi (Enflasyon)
+
+    Döndürür: {'vix': float, 'rate': float, 'cpi': float}
+    Hata durumunda varsayılan değerler: VIX=20, Faiz=5, Enflasyon=3
+    """
+    defaults = {"vix": 20.0, "rate": 5.0, "cpi": 3.0}
+    fred_key = os.getenv("FRED_API_KEY", "")
+    if not fred_key:
+        log.info("[MACRO] FRED_API_KEY tanımlı değil — varsayılan değerler kullanılıyor")
+        return defaults
+
+    try:
+        fred = Fred(api_key=fred_key)
+        result = {}
+
+        for col, series_id in [("vix", "VIXCLS"), ("rate", "DFF"), ("cpi", "CPIAUCSL")]:
+            try:
+                series = fred.get_series(series_id)
+                value  = float(series.dropna().iloc[-1])
+                result[col] = value
+            except Exception as e:
+                log.warning(f"[MACRO] {series_id} çekilemedi: {e} — varsayılan kullanılıyor")
+                result[col] = defaults[col]
+
+        log.info(
+            f"[MACRO] VIX={result['vix']:.1f} | "
+            f"Faiz={result['rate']:.2f}% | "
+            f"Enflasyon={result['cpi']:.1f}"
+        )
+        return result
+
+    except Exception as e:
+        log.warning(f"[MACRO] FRED bağlantısı başarısız: {e} — varsayılan değerler kullanılıyor")
+        return defaults
 
 
 # ─── Insider Sentiment ────────────────────────────────────────────────────────

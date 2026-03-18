@@ -43,6 +43,7 @@ from alternative_data import (
     get_insider_sentiment,
     get_economic_calendar,
     get_llm_sentiment_analysis,
+    get_fred_macro_data,
 )
 
 from telegram import Update
@@ -625,6 +626,7 @@ def place_bracket_buy(
     price: float,
     atr: float,
     final_score: float = 65.0,
+    macro_multiplier: float = 1.0,
 ) -> str:
     """Bracket limit-buy emri gönderir. Giriş fiyatı mid-point (bid/ask ortası)."""
     notional = calculate_position_size(
@@ -633,6 +635,7 @@ def place_bracket_buy(
         atr=atr,
         price=price,
         tp_sl_ratio=ATR_TP_MULT / ATR_SL_MULT,
+        macro_multiplier=macro_multiplier,
     )
 
     # Gerçek zamanlı mid-point al; başarısız olursa teknik analiz fiyatını kullan
@@ -705,6 +708,21 @@ def scan_once(engine: AlpacaEngine) -> None:
         f"Nakit: ${buying_power:.0f} | Açık pozisyon: {len(active_tickers)}"
     )
 
+    # ── Makro veri — tarama başında bir kez çekilir ──────────────────────────
+    macro_data       = get_fred_macro_data()
+    vix              = macro_data["vix"]
+    macro_multiplier = 1.0
+
+    log.info(f"[MACRO] VIX: {vix:.1f}, Faiz: {macro_data['rate']:.2f}%, Enflasyon: {macro_data['cpi']:.1f}")
+
+    if vix > 30:
+        macro_multiplier = 0.5
+        tg_send(
+            f"⚠️ YÜKSEK VOLATİLİTE! VIX Endeksi {vix:.1f} seviyesinde. "
+            f"Risk yönetimi gereği pozisyon büyüklükleri %50 azaltıldı."
+        )
+        log.warning(f"[MACRO] VIX={vix:.1f} > 30 — macro_multiplier=0.5 aktif")
+
     # ── Ekonomik takvim — tarama başında bir kez kontrol edilir ──────────────
     eco_risk, eco_event = get_economic_calendar()
     if eco_risk:
@@ -748,7 +766,8 @@ def scan_once(engine: AlpacaEngine) -> None:
                 if ok:
                     action_msg = place_bracket_buy(
                         engine, ticker, portfolio_val,
-                        tech_data["price"], tech_data["atr"], final
+                        tech_data["price"], tech_data["atr"], final,
+                        macro_multiplier
                     )
                     # Pozisyonu listeye ekle (cache için sahte nesne)
                     active_tickers.add(ticker)
