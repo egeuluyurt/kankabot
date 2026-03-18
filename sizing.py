@@ -23,8 +23,8 @@ def calculate_position_size(
     win_rate: float = 0.52,        # Backtesting win_rate; ölçüm yapıldıkça güncelle
     kelly_fraction: float = 0.25,  # 1/4 Kelly — güvenli başlangıç noktası
     tp_sl_ratio: float = 2.0,      # ATR_TP_MULT / ATR_SL_MULT (3.0 / 1.5)
-    max_pct: float = 10.0,         # Portföyün max %10'u
-    min_pct: float = 1.0,          # Portföyün min %1'i
+    max_pct: float = 15.0,         # Portföyün max %15'i
+    min_pct: float = 0.0,          # Kelly 0 diyorsa 0 — overbetting yasak
     macro_multiplier: float = 1.0, # Makro risk çarpanı (örn. VIX>30 → 0.5)
 ) -> float:
     """
@@ -66,9 +66,13 @@ def calculate_position_size(
     # ── Efektif Kelly ────────────────────────────────────────────────────────
     effective_kelly = raw_kelly * kelly_fraction * signal_strength * vol_penalty
 
+    if effective_kelly <= 0:
+        log.info("Kelly negatif/sıfır — pozisyon açılmıyor")
+        return 0.0
+
     # ── Portföy yüzdesine dönüştür ve sınırla ───────────────────────────────
     position_pct = effective_kelly * 100
-    position_pct = max(min_pct, min(position_pct, max_pct))
+    position_pct = min(position_pct, max_pct)   # sadece üst sınır
 
     notional = portfolio_value * position_pct / 100
 

@@ -907,13 +907,25 @@ def scan_once(engine: AlpacaEngine) -> None:
                     if not ok:
                         action_msg = f"Alım engellendi: {reason}"
                 if ok:
-                    action_msg = place_bracket_buy(
-                        engine, ticker, portfolio_val,
-                        tech_data["price"], tech_data["atr"], final,
-                        macro_multiplier
+                    notional = calculate_position_size(
+                        portfolio_value=portfolio_val,
+                        final_score=final,
+                        atr=tech_data["atr"],
+                        price=tech_data["price"],
+                        tp_sl_ratio=ATR_TP_MULT / ATR_SL_MULT,
+                        macro_multiplier=macro_multiplier,
                     )
-                    # Pozisyonu listeye ekle (cache için sahte nesne)
-                    active_tickers.add(ticker)
+                    if notional <= 0:
+                        action_msg = "Alım engellendi: Kelly sıfır pozisyon önerdi"
+                        log.info(f"{ticker}: {action_msg}")
+                    else:
+                        action_msg = place_bracket_buy(
+                            engine, ticker, portfolio_val,
+                            tech_data["price"], tech_data["atr"], final,
+                            macro_multiplier
+                        )
+                        # Pozisyonu listeye ekle (cache için sahte nesne)
+                        active_tickers.add(ticker)
 
             elif "SAT" in signal and ticker in active_tickers and is_market_hours():
                 action_msg = place_sell(engine, ticker, portfolio_val)
