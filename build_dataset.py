@@ -29,6 +29,69 @@ from regime import calculate_hurst
 
 load_dotenv("config.env")
 
+
+# ─── Triple-Barrier Etiketleme ────────────────────────────────────────────────
+def triple_barrier_label(
+    df: pd.DataFrame,
+    sl_mult: float = 1.5,
+    tp_mult: float = 3.0,
+    max_bars: int = 5,
+) -> list:
+    """
+    Her satır için gerçek trade senaryosunu simüle eder.
+    +1 = TP bariyerine önce çarptı
+    -1 = SL bariyerine önce çarptı
+     0 = max_bars doldu (nötr)
+    Ham fiyat DROP'tan ÖNCE çağrılmalıdır.
+    """
+    if "atr" not in df.columns:
+        raise ValueError("ATR kolonu eksik")
+
+    closes = df["close"].values if "close" in df.columns else None
+
+    raw_closes = df["close"].values if "close" in df.columns else \
+                 (df["price_ema200_ratio"].values * df["ema200"].values
+                  if "ema200" in df.columns else None)
+
+    highs = df["high"].values if "high" in df.columns else raw_closes
+    lows  = df["low"].values  if "low"  in df.columns else raw_closes
+    atrs  = df["atr"].values
+
+    labels = []
+    for i in range(len(df) - max_bars):
+        atr_i = atrs[i]
+        if pd.isna(atr_i) or atr_i <= 0:
+            labels.append(None)
+            continue
+
+        entry = raw_closes[i] if raw_closes is not None else 0
+        sl    = entry - sl_mult * atr_i
+        tp    = entry + tp_mult * atr_i
+        result = 0
+
+        for j in range(1, max_bars + 1):
+            lo = lows[i + j]
+            hi = highs[i + j] if highs is not None else lo
+
+            sl_hit = lo <= sl
+            tp_hit = hi >= tp
+
+            if sl_hit and tp_hit:
+                result = -1
+                break
+            elif tp_hit:
+                result = 1
+                break
+            elif sl_hit:
+                result = -1
+                break
+
+        labels.append(result)
+
+    labels += [None] * max_bars
+    return labels
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -128,7 +191,6 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     # ── Teknik indikatörler (.values ile index çakışması engellenir) ──────────
     df["ema50"]  = close.ewm(span=50,  adjust=False, min_periods=0).mean().values
     df["ema200"] = close.ewm(span=200, adjust=False, min_periods=0).mean().values
-    df["price_ema200_ratio"] = (close / df["ema200"]).values
 
     df["rsi"] = ta.momentum.rsi(close, window=14).values
 
@@ -168,12 +230,23 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
 
     df["hurst"] = hurst_vals
 
-    # ── Günlük fiyat değişimi ─────────────────────────────────────────────────
-    df["daily_return"] = close.pct_change().values
+    # ── Stationary & türetilmiş özellikler ────────────────────────────────────
+    df["price_ema50_ratio"]  = df["close"] / df["ema50"]
+    df["price_ema200_ratio"] = df["close"] / df["ema200"]
+    df["volume_zscore"]      = (
+        df["volume"] - df["volume"].rolling(20).mean()
+    ) / df["volume"].rolling(20).std()
+    df["daily_return"]       = df["close"].pct_change()
+    df["log_return"]         = np.log(df["close"] / df["close"].shift(1))
 
-    # ── TARGET: 5 iş günü sonrası %2+ yükseliş = 1 ───────────────────────────
-    df["future_close"] = close.shift(-FORWARD_BARS).values
-    df["target"]       = ((df["future_close"] / close.values - 1) >= TARGET_PCT / 100).astype(int)
+    # ── Triple-Barrier Etiketleme (ham fiyat DROP'tan önce) ───────────────────
+    df["target"] = triple_barrier_label(df, sl_mult=1.5, tp_mult=3.0, max_bars=5)
+    df = df.dropna(subset=["target", "atr"])
+    df["target"] = df["target"].astype(int)
+
+    # ── Ham fiyat ve EMA kolonlarını kaldır (stationarity) ────────────────────
+    df.drop(columns=["open", "high", "low", "close", "volume",
+                      "ema50", "ema200"], inplace=True, errors="ignore")
 
     # ── Makro veriyi merge_asof ile ekle (Düzeltme 3: tarih format eşitleme) ──
     df = df.reset_index()                                  # date index → sütun
@@ -197,7 +270,7 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
 
     # ── Temizlik ──────────────────────────────────────────────────────────────
     # future_close NaN olan son FORWARD_BARS satırı düşür
-    df = df.dropna(subset=["target", "rsi", "macd", "adx"])
+    df = df.dropna(subset=["rsi", "macd", "adx"])
 
     log.info(f"{ticker}: {len(df)} satır hazır")
     return df
@@ -231,10 +304,11 @@ def main():
     combined = pd.concat(all_frames, ignore_index=True)
 
     # Kolon sırası
-    base_cols   = ["date", "ticker", "open", "high", "low", "close", "volume"]
-    tech_cols   = ["ema50", "ema200", "price_ema200_ratio",
+    base_cols   = ["date", "ticker"]
+    tech_cols   = ["price_ema50_ratio", "price_ema200_ratio",
                    "rsi", "macd", "macd_hist", "macd_above_signal",
-                   "atr", "atr_pct", "bb_width", "adx", "hurst", "daily_return"]
+                   "atr", "atr_pct", "bb_width", "adx", "hurst",
+                   "daily_return", "log_return", "volume_zscore"]
     macro_cols  = list(FRED_SERIES.keys())
     label_cols  = ["target"]
     ordered     = base_cols + tech_cols + macro_cols + label_cols

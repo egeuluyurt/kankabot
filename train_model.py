@@ -1,10 +1,10 @@
 """
-Kanka Sinyal Botu v5.1 — Model Eğitimi
-========================================
-kanka_training_data.csv üzerinde LightGBM sınıflandırıcısı eğitir.
+Kanka Sinyal Botu v5.1 — Model Eğitimi (Walk-Forward)
+=======================================================
+kanka_training_data.csv üzerinde TimeSeriesSplit ile 5-fold
+walk-forward validation yaparak LightGBM eğitir.
 
-Çıktı: kanka_model.joblib
-  - LGBMClassifier: OHLCV + teknik indikatörler + makro → 5 gün içinde %2+ yükseliş tahmini
+Çıktı: kanka_model.joblib  (en yüksek macro F1'li fold'un modeli)
 
 Çalıştırma:
   python train_model.py
@@ -14,9 +14,11 @@ import logging
 import sys
 
 import joblib
+import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.model_selection import TimeSeriesSplit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,49 +30,78 @@ log = logging.getLogger(__name__)
 DATA_FILE  = "kanka_training_data.csv"
 MODEL_FILE = "kanka_model.joblib"
 
+TARGET_COL = "target"
+DROP_COLS  = ["date", "ticker", "target"]
+
 # ─── Veri Yükleme ─────────────────────────────────────────────────────────────
 log.info(f"Veri yükleniyor: {DATA_FILE}")
 df = pd.read_csv(DATA_FILE)
-log.info(f"Toplam satır: {len(df):,} | Kolonlar: {list(df.columns)}")
 df.dropna(inplace=True)
-log.info(f"dropna sonrası satır: {len(df):,}")
+log.info(f"Toplam satır: {len(df):,}")
+log.info(f"Target dağılımı:\n{df[TARGET_COL].value_counts().to_string()}")
 
 # ─── Özellik ve Hedef ─────────────────────────────────────────────────────────
-X = df.drop(columns=["date", "ticker", "target"], errors="ignore")
-y = df["target"]
+feature_cols = [c for c in df.columns if c not in DROP_COLS]
+X = df[feature_cols].values
+y = df[TARGET_COL].values
+log.info(f"Özellik sayısı: {len(feature_cols)} → {feature_cols}")
 
-log.info(f"Özellik sayısı: {X.shape[1]} | Hedef dağılımı:\n{y.value_counts().to_string()}")
+# ─── Walk-Forward Validation (5 Fold) ────────────────────────────────────────
+tscv       = TimeSeriesSplit(n_splits=5)
+scores     = []
+best_model = None
+best_f1    = -np.inf
 
-# ─── Eğitim / Test Bölmesi ────────────────────────────────────────────────────
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.20, random_state=42, shuffle=False  # zaman serisi — karıştırma
-)
-log.info(f"Eğitim: {len(X_train):,} satır | Test: {len(X_test):,} satır")
+for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = y[train_idx], y[val_idx]
 
-# ─── Model Eğitimi ────────────────────────────────────────────────────────────
-log.info("LGBMClassifier eğitiliyor...")
-model = LGBMClassifier(
-    n_estimators=500,
-    learning_rate=0.05,
-    num_leaves=31,
-    random_state=42,
-    n_jobs=-1,
-    verbose=-1,
-)
-model.fit(X_train, y_train)
+    model = LGBMClassifier(
+        n_estimators      = 400,
+        learning_rate     = 0.05,
+        num_leaves        = 15,
+        min_child_samples = 20,
+        subsample         = 0.8,
+        colsample_bytree  = 0.8,
+        reg_alpha         = 0.1,
+        reg_lambda        = 1.0,
+        class_weight      = "balanced",
+        random_state      = 42,
+        verbose           = -1,
+        n_jobs            = -1,
+    )
 
-# ─── Başarı Analizi ───────────────────────────────────────────────────────────
-accuracy = model.score(X_test, y_test)
-print(f"\nModel Accuracy (Test): {accuracy:.4f}  ({accuracy*100:.2f}%)\n")
+    model.fit(
+        X_train, y_train,
+        eval_set  = [(X_val, y_val)],
+        callbacks = [
+            __import__("lightgbm").early_stopping(30, verbose=False),
+            __import__("lightgbm").log_evaluation(0),
+        ],
+    )
 
-feature_names = X.columns.tolist()
-importances   = model.feature_importances_
-top5_idx      = sorted(range(len(importances)), key=lambda i: importances[i], reverse=True)[:5]
+    report   = classification_report(
+        y_val, model.predict(X_val),
+        output_dict=True, zero_division=0,
+    )
+    macro_f1 = report["macro avg"]["f1-score"]
+    scores.append(macro_f1)
+    log.info(f"Fold {fold + 1}/5 — Macro F1: {macro_f1:.3f}")
 
+    if macro_f1 > best_f1:
+        best_f1    = macro_f1
+        best_model = model
+
+log.info(f"Walk-Forward Ort F1: {np.mean(scores):.3f} ± {np.std(scores):.3f}")
+log.info(f"En iyi fold F1: {best_f1:.3f}")
+
+# ─── En önemli 5 özellik ──────────────────────────────────────────────────────
+importances = best_model.feature_importances_
+top5_idx    = sorted(range(len(importances)), key=lambda i: importances[i], reverse=True)[:5]
 log.info("En önemli 5 özellik:")
 for rank, idx in enumerate(top5_idx, 1):
-    log.info(f"  {rank}. {feature_names[idx]:<25} importance={importances[idx]:,.0f}")
+    log.info(f"  {rank}. {feature_cols[idx]:<25} importance={importances[idx]:,.0f}")
 
 # ─── Kaydet ───────────────────────────────────────────────────────────────────
-joblib.dump(model, MODEL_FILE)
+joblib.dump(best_model, MODEL_FILE)
 log.info(f"Model kaydedildi: {MODEL_FILE}")
