@@ -17,6 +17,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import joblib
+import numpy as np
 import requests
 import yfinance as yf
 import pandas as pd
@@ -610,10 +611,10 @@ def composite_score(
 
 # ─── ML Skor ──────────────────────────────────────────────────────────────────
 ML_FEATURES = [
-    "open", "high", "low", "close", "volume",
-    "ema50", "ema200", "price_ema200_ratio",
+    "price_ema50_ratio", "price_ema200_ratio",
     "rsi", "macd", "macd_hist", "macd_above_signal",
-    "atr", "atr_pct", "bb_width", "adx", "hurst", "daily_return",
+    "atr", "atr_pct", "bb_width", "adx", "hurst",
+    "daily_return", "log_return", "volume_zscore",
     "vix", "fed_rate", "cpi",
 ]
 
@@ -648,14 +649,12 @@ def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
         except Exception:
             hurst = 0.5
 
+        vol_mean = df["volume"].rolling(20).mean().iloc[-1]
+        vol_std  = df["volume"].rolling(20).std().iloc[-1]
+        vol_std  = vol_std if vol_std and vol_std > 0 else 1.0
+
         row = {
-            "open":               float(df["open"].iloc[-1]),
-            "high":               float(df["high"].iloc[-1]),
-            "low":                float(df["low"].iloc[-1]),
-            "close":              float(close.iloc[-1]),
-            "volume":             float(df["volume"].iloc[-1]),
-            "ema50":              float(ema50.iloc[-1]),
-            "ema200":             float(ema200.iloc[-1]),
+            "price_ema50_ratio":  float(close.iloc[-1] / ema50.iloc[-1]),
             "price_ema200_ratio": float(close.iloc[-1] / ema200.iloc[-1]),
             "rsi":                float(ta.momentum.rsi(close, window=14).iloc[-1]),
             "macd":               float(macd_ind.macd().iloc[-1]),
@@ -667,6 +666,8 @@ def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
             "adx":                float(adx_ind.adx().iloc[-1]),
             "hurst":              hurst,
             "daily_return":       float(close.pct_change().iloc[-1]),
+            "log_return":         float(np.log(close.iloc[-1] / close.iloc[-2])) if len(close) >= 2 else 0.0,
+            "volume_zscore":      float((df["volume"].iloc[-1] - vol_mean) / vol_std),
             "vix":                float(macro_data.get("vix", 20.0)),
             "fed_rate":           float(macro_data.get("rate", 5.0)),
             "cpi":                float(macro_data.get("cpi", 3.0)),
