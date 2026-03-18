@@ -40,7 +40,7 @@ jobs:
           echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> config.env
           echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> config.env
           echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> config.env
-          echo "TICKERS=AAPL,TSLA,NVDA,SPY,QQQ" >> config.env
+          echo "TICKERS=NVDA,AMD,QQQ,SMH,AAPL,MSFT,TSLA,PLTR,SPY,UNH" >> config.env
           echo "BUY_THRESHOLD=65" >> config.env
           echo "SELL_THRESHOLD=35" >> config.env
           echo "POSITION_PCT=5" >> config.env

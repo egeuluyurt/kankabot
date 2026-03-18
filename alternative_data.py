@@ -45,12 +45,19 @@ _retry_alt = retry(
 @_retry_alt
 def get_insider_sentiment(ticker: str) -> float:
     """
-    Finnhub /stock/insider-transactions üzerinden içeriden alım/satım dengesi.
+    Finnhub /stock/insider-transactions — Cluster Buying mantığı.
 
-    Döndürür: 0–100 skor
-      > 60 → net içeriden alım (pozitif sinyal)
-      = 50 → nötr / veri yok
-      < 40 → net içeriden satış (negatif sinyal)
+    Sinyal gücü hacimden (share sayısı) değil, KAÇ FARKLI KİŞİNİN
+    aynı yönde işlem yaptığından üretilir. Birden fazla yönetici aynı
+    anda alım yapıyorsa bu güçlü bir 'cluster buying' sinyalidir.
+
+    Skor:
+      buyer_count  > seller_count  → >50 (cluster buy)
+      buyer_count  < seller_count  → <50 (cluster sell)
+      buyer_count == seller_count  → 50  (nötr)
+      Veri yok                     → 50  (nötr)
+
+    Döndürür: 0–100 float
     """
     api_key = os.getenv("FINNHUB_API_KEY", "")
     if not api_key:
@@ -66,25 +73,32 @@ def get_insider_sentiment(ticker: str) -> float:
             log.info(f"{ticker} insider: veri yok → nötr (50)")
             return 50.0
 
-        buy_shares  = 0.0
-        sell_shares = 0.0
+        # Her benzersiz kişi (name) için işlem yönünü belirle
+        buyer_names  = set()
+        seller_names = set()
         for t in data:
-            ttype  = t.get("transactionType", "")
-            shares = abs(float(t.get("share", 0) or 0))
-            # "P" = Purchase, "S" = Sale (Finnhub formatı)
+            ttype = t.get("transactionType", "")
+            name  = t.get("name", "").strip()
+            if not name:
+                continue
             if ttype == "P" or ttype.upper().startswith("P"):
-                buy_shares += shares
+                buyer_names.add(name)
             elif ttype == "S" or ttype.upper().startswith("S"):
-                sell_shares += shares
+                seller_names.add(name)
 
-        total = buy_shares + sell_shares
+        buyer_count  = len(buyer_names)
+        seller_count = len(seller_names)
+        total        = buyer_count + seller_count
+
         if total == 0:
             return 50.0
 
-        score = (buy_shares / total) * 100
+        # Cluster oranı: alıcı kişi sayısının toplama oranı → 0–100
+        score = (buyer_count / total) * 100
+
         log.info(
-            f"{ticker} Insider: alım={buy_shares:.0f} hisse, "
-            f"satış={sell_shares:.0f} hisse → skor={score:.1f}"
+            f"{ticker} Insider Cluster: {buyer_count} alıcı kişi, "
+            f"{seller_count} satıcı kişi → skor={score:.1f}"
         )
         return round(score, 1)
 

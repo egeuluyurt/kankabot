@@ -69,7 +69,7 @@ PAPER_TRADING     = os.getenv("PAPER_TRADING", "true").lower() == "true"
 FINNHUB_API_KEY   = os.getenv("FINNHUB_API_KEY", "")
 TG_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID", "")
-TICKERS           = [t.strip() for t in os.getenv("TICKERS", "AAPL,TSLA,NVDA,SPY,QQQ").split(",")]
+TICKERS           = [t.strip() for t in os.getenv("TICKERS", "NVDA,AMD,QQQ,SMH,AAPL,MSFT,TSLA,PLTR,SPY,UNH").split(",")]
 BUY_THRESHOLD     = float(os.getenv("BUY_THRESHOLD", "65"))
 SELL_THRESHOLD    = float(os.getenv("SELL_THRESHOLD", "35"))
 POSITION_PCT      = float(os.getenv("POSITION_PCT", "5"))
@@ -402,17 +402,36 @@ def get_technical_score(ticker: str) -> dict:
         result["macd_dir"]   = macd_dir
 
         # ── MTF çelişki cezası ────────────────────────────────────────────
-        daily_bull = price > ema200_v
-        daily_bear = not daily_bull
+        daily_bull  = price > ema200_v
+        daily_bear  = not daily_bull
         hourly_bull = rsi_val > 60 and macd_score > 60
         hourly_bear = rsi_val < 40 and macd_score < 40
 
-        tech_score = daily_score * 0.40 + rsi_score * 0.30 + macd_score * 0.30
+        # ── Rejime göre ağırlıklı tech_score ─────────────────────────────
+        # TREND   → trend takip indikatörleri (EMA/MACD) ön planda
+        # RANGING → aşırı alım/satım indikatörü (RSI) ön planda
+        # UNKNOWN → dengeli orta yol
+        _regime = result.get("regime", MarketRegime.UNKNOWN)
+        if _regime == MarketRegime.TRENDING:
+            # daily(EMA)=0.50, macd=0.35, rsi=0.15
+            tech_score = daily_score * 0.50 + macd_score * 0.35 + rsi_score * 0.15
+        elif _regime == MarketRegime.RANGING:
+            # rsi=0.55, daily(EMA)=0.30, macd=0.15
+            tech_score = daily_score * 0.30 + rsi_score * 0.55 + macd_score * 0.15
+        else:
+            # UNKNOWN — eski dengeli ağırlıklar
+            tech_score = daily_score * 0.40 + rsi_score * 0.30 + macd_score * 0.30
 
         if daily_bull and hourly_bear:
             tech_score *= 0.85
         elif daily_bear and hourly_bull:
             tech_score *= 0.85
+
+        log.info(
+            f"{ticker} tech_score={tech_score:.1f} "
+            f"(rejim={_regime}, daily={daily_score:.0f}, "
+            f"rsi={rsi_score:.0f}, macd={macd_score:.0f})"
+        )
 
         result["tech_score"] = tech_score
 
