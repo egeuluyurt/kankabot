@@ -104,11 +104,15 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
         log.warning(f"{ticker}: yetersiz veri ({len(df)} satır), atlandı")
         return pd.DataFrame()
 
-    df.columns = [c.lower() for c in df.columns]
-    df.index   = pd.to_datetime(df.index).tz_localize(None)
-    df         = df[["open", "high", "low", "close", "volume"]].copy()
+    # ── Sütun standartlaştırma (Düzeltme 1) ──────────────────────────────────
+    df.reset_index(inplace=True)                          # index → 'Date' sütunu
+    df.columns = [c.lower() for c in df.columns]          # 'Date' → 'date'
+    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+    df = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    df = df.sort_values("date").reset_index(drop=True)
 
     close = df["close"]
+    df = df.set_index("date")  # teknik hesaplar için index'e al
 
     # ── Teknik indikatörler ───────────────────────────────────────────────────
     df["ema50"]  = close.ewm(span=50,  adjust=False, min_periods=0).mean()
@@ -142,8 +146,15 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
             adx_vals.append(np.nan)
             hurst_vals.append(np.nan)
         else:
-            adx_vals.append(calculate_adx(chunk))
-            hurst_vals.append(calculate_hurst(chunk["close"]))
+            # Düzeltme 2: ADX/Hurst IndexError koruması
+            try:
+                adx_vals.append(calculate_adx(chunk))
+            except Exception:
+                adx_vals.append(25.0)  # nötr varsayılan
+            try:
+                hurst_vals.append(calculate_hurst(chunk["close"]))
+            except Exception:
+                hurst_vals.append(0.5)  # nötr varsayılan
 
     df["adx"]   = adx_vals
     df["hurst"] = hurst_vals
@@ -155,15 +166,20 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     df["future_close"] = close.shift(-FORWARD_BARS)
     df["target"]       = ((df["future_close"] / close - 1) >= TARGET_PCT / 100).astype(int)
 
-    # ── Makro veriyi merge_asof ile ekle ─────────────────────────────────────
-    df = df.reset_index().rename(columns={"index": "date"})
-    macro_reset = macro_df.reset_index().rename(columns={"index": "date"})
-    macro_reset["date"] = pd.to_datetime(macro_reset["date"])
-    df["date"] = pd.to_datetime(df["date"])
+    # ── Makro veriyi merge_asof ile ekle (Düzeltme 3: tarih format eşitleme) ──
+    df = df.reset_index()                                  # date index → sütun
+    df.rename(columns={"index": "date"}, inplace=True)     # yedek rename
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize() # tz ve saat kaldır
+    df = df.sort_values("date").reset_index(drop=True)
+
+    macro_reset = macro_df.reset_index()
+    macro_reset.rename(columns={"index": "date"}, inplace=True)
+    macro_reset["date"] = pd.to_datetime(macro_reset["date"]).dt.normalize()
+    macro_reset = macro_reset.sort_values("date").reset_index(drop=True)
 
     df = pd.merge_asof(
-        df.sort_values("date"),
-        macro_reset.sort_values("date"),
+        df,
+        macro_reset,
         on="date",
         direction="backward",   # en yakın geçmiş veriyi al
     )
