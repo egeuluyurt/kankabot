@@ -15,6 +15,7 @@ Kanka Sinyal Botu v5.1 — Veri Fabrikası
 
 import os
 import sys
+import time
 import logging
 from datetime import datetime, date
 
@@ -24,7 +25,7 @@ import yfinance as yf
 import ta
 from dotenv import load_dotenv
 
-from regime import calculate_adx, calculate_hurst
+from regime import calculate_hurst
 
 load_dotenv("config.env")
 
@@ -74,7 +75,7 @@ def fetch_fred_series() -> pd.DataFrame:
             frames[col] = s.rename(col)
 
         macro = pd.concat(frames.values(), axis=1)
-        macro.index = pd.to_datetime(macro.index)
+        macro.index = pd.to_datetime(macro.index).tz_localize(None)
         macro = macro.sort_index()
 
         # Günlük frekansa upsample et (merge_asof için hazırlık)
@@ -104,9 +105,13 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
         log.warning(f"{ticker}: yetersiz veri ({len(df)} satır), atlandı")
         return pd.DataFrame()
 
-    # ── Sütun standartlaştırma (Düzeltme 1) ──────────────────────────────────
-    df.reset_index(inplace=True)                          # index → 'Date' sütunu
-    df.columns = [c.lower() for c in df.columns]          # 'Date' → 'date'
+    # ── Sütun standartlaştırma ────────────────────────────────────────────────
+    df = df.reset_index()
+    df.rename(columns={
+        "Date": "date", "Datetime": "date",
+        "Open": "open", "High": "high",
+        "Low": "low", "Close": "close", "Volume": "volume",
+    }, inplace=True)
     df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
     df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     df = df.sort_values("date").reset_index(drop=True)
@@ -133,9 +138,14 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     bb = ta.volatility.BollingerBands(close, window=20)
     df["bb_width"] = (bb.bollinger_hband() - bb.bollinger_lband()) / close
 
-    # ── ADX + Hurst (rolling window) ─────────────────────────────────────────
-    # Tüm satırlar üzerinde rolling 60 günlük pencere ile hesapla
-    adx_vals   = []
+    # ── ADX (ta library, tüm seri) ────────────────────────────────────────────
+    if len(df) >= 15:
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        df["adx"] = adx_ind.adx()
+    else:
+        df["adx"] = float("nan")
+
+    # ── Hurst (rolling 60 günlük pencere) ────────────────────────────────────
     hurst_vals = []
     window     = 60
 
@@ -143,20 +153,13 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
         start_i = max(0, i - window + 1)
         chunk   = df.iloc[start_i : i + 1]
         if len(chunk) < 20:
-            adx_vals.append(np.nan)
             hurst_vals.append(np.nan)
         else:
-            # Düzeltme 2: ADX/Hurst IndexError koruması
-            try:
-                adx_vals.append(calculate_adx(chunk))
-            except Exception:
-                adx_vals.append(25.0)  # nötr varsayılan
             try:
                 hurst_vals.append(calculate_hurst(chunk["close"]))
             except Exception:
-                hurst_vals.append(0.5)  # nötr varsayılan
+                hurst_vals.append(0.5)
 
-    df["adx"]   = adx_vals
     df["hurst"] = hurst_vals
 
     # ── Günlük fiyat değişimi ─────────────────────────────────────────────────
@@ -213,6 +216,7 @@ def main():
                 all_frames.append(frame)
         except Exception as e:
             log.error(f"{ticker} işleme hatası: {e}")
+        time.sleep(2)
 
     if not all_frames:
         log.error("Hiç veri üretilemedi!")
