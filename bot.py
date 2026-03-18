@@ -37,6 +37,8 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderType
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
 
+from regime import detect_regime, MarketRegime
+
 from telegram import Update
 from telegram.error import Conflict
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -270,6 +272,9 @@ def get_technical_score(ticker: str) -> dict:
         "rsi_val": 50.0,    "macd_dir": "—",
         "price": 0.0,       "ema200": 0.0,
         "atr": None,
+        "regime": MarketRegime.UNKNOWN,
+        "adx": 25.0,
+        "hurst": 0.5,
     }
     try:
         # ── Günlük filtre ─────────────────────────────────────────────────
@@ -304,6 +309,16 @@ def get_technical_score(ticker: str) -> dict:
         else:
             daily_score = 50
         result["daily_score"] = daily_score
+
+        # ── Piyasa rejimi (ADX + Hurst) ───────────────────────────────────
+        regime, regime_det = detect_regime(daily)
+        result["regime"] = regime
+        result["adx"]    = regime_det["adx"]
+        result["hurst"]  = regime_det["hurst"]
+        log.info(
+            f"{ticker} Rejim: {regime} | "
+            f"ADX={regime_det['adx']:.1f} | Hurst={regime_det['hurst']:.3f}"
+        )
 
         # ── Saatlik tetikleyici ───────────────────────────────────────────
         hourly = _download_fix(ticker, "60d", "1h")
@@ -533,6 +548,7 @@ def should_buy(
     portfolio_value: float,
     buying_power: float,
     atr: Optional[float],
+    regime: str = MarketRegime.UNKNOWN,
 ) -> tuple[bool, str]:
     """Alım koşullarını sırayla kontrol eder."""
     global BOT_PAUSED
@@ -540,6 +556,8 @@ def should_buy(
         return False, "Bot duraklatıldı"
     if not is_market_hours():
         return False, "Borsa kapalı"
+    if regime == MarketRegime.RANGING:
+        return False, "Yatay piyasa (RANGING) — trend-takip sinyali geçersiz"
     active_symbols = [p.symbol for p in positions]
     if len(active_symbols) >= MAX_POSITIONS:
         return False, f"Pozisyon limiti ({MAX_POSITIONS})"
@@ -656,7 +674,8 @@ def scan_once(engine: AlpacaEngine) -> None:
 
             if "AL" in signal and is_market_hours():
                 ok, reason = should_buy(
-                    ticker, positions, portfolio_val, buying_power, tech_data["atr"]
+                    ticker, positions, portfolio_val, buying_power,
+                    tech_data["atr"], tech_data.get("regime", MarketRegime.UNKNOWN)
                 )
                 if ok:
                     action_msg = place_bracket_buy(
@@ -708,6 +727,7 @@ def _send_signal_message(
         f"  Günlük filtre : {tech_data['daily_score']:.0f}\n"
         f"  RSI(14)       : {tech_data['rsi_val']:.1f}\n"
         f"  MACD yön      : {tech_data['macd_dir']}\n"
+        f"  Rejim         : {tech_data.get('regime', '—')} (ADX={tech_data.get('adx', 0):.1f} / H={tech_data.get('hurst', 0):.2f})\n"
         f"  Fiyat         : ${price:.2f}\n"
         f"  EMA200        : ${tech_data['ema200']:.2f}\n"
         f"\n"
