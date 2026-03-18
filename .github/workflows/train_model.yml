@@ -21,9 +21,13 @@ jobs:
       - name: Bağımlılıkları kur
         run: pip install -r requirements.txt
 
-      - name: config.env oluştur (eğitim için FRED_API_KEY opsiyonel)
+      - name: config.env oluştur
         run: |
           echo "FRED_API_KEY=${{ secrets.FRED_API_KEY }}" >> config.env
+          echo "FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}" >> config.env
+
+      - name: Eğitim verisini üret
+        run: python build_dataset.py
 
       - name: Modeli eğit
         run: python train_model.py
