@@ -32,6 +32,8 @@ MODEL_FILE = "kanka_model.joblib"
 log.info(f"Veri yükleniyor: {DATA_FILE}")
 df = pd.read_csv(DATA_FILE)
 log.info(f"Toplam satır: {len(df):,} | Kolonlar: {list(df.columns)}")
+df.dropna(inplace=True)
+log.info(f"dropna sonrası satır: {len(df):,}")
 
 # ─── Özellik ve Hedef ─────────────────────────────────────────────────────────
 X = df.drop(columns=["date", "ticker", "target"], errors="ignore")
