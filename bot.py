@@ -89,8 +89,9 @@ EARLY_EXIT_PCT       = -7.0  # Zarar >= %-7 → SL beklenmeden piyasadan çık
 # ─── Global durum ─────────────────────────────────────────────────────────────
 BOT_PAUSED       = False
 CRITICAL_DATA_OK = True   # False olursa tüm alımlar durur
-vader      = SentimentIntensityAnalyzer()
-ml_model   = None   # joblib ile yüklenen LGBMClassifier (main'de doldurulur)
+vader        = SentimentIntensityAnalyzer()
+ml_model     = None   # joblib ile yüklenen LGBMClassifier (main'de doldurulur)
+model_stats  = None   # drift tespiti referans istatistikleri (main'de doldurulur)
 
 class InverseVarianceWeighter:
     def __init__(self, window: int = 20):
@@ -561,6 +562,26 @@ def get_apewisdom_score(ticker: str) -> float:
         return 50.0
 
 
+# ─── SMH/QQQ Sektörel Rotasyon Oranı ─────────────────────────────────────────
+def get_smh_qqq_ratio() -> float:
+    """
+    SMH/QQQ ham fiyat oranını döndürür.
+    > 0.60 → semiconductor güçlü | < 0.50 → semiconductor zayıf
+    Hata durumunda 0.55 (yaklaşık tarihi ortalama) döner.
+    """
+    try:
+        smh = yf.Ticker("SMH").history(period="5d", interval="1d", auto_adjust=True)
+        qqq = yf.Ticker("QQQ").history(period="5d", interval="1d", auto_adjust=True)
+        if smh.empty or qqq.empty:
+            return 0.55
+        ratio = float(smh["Close"].iloc[-1] / qqq["Close"].iloc[-1])
+        log.info(f"[MACRO] SMH/QQQ ratio: {ratio:.4f}")
+        return round(ratio, 4)
+    except Exception as e:
+        log.warning(f"SMH/QQQ ratio hesaplanamadı: {e}")
+        return 0.55
+
+
 # ─── Finnhub Sentiment ────────────────────────────────────────────────────────
 @retry_on_rate_limit
 def get_finnhub_score(ticker: str) -> float:
@@ -650,16 +671,38 @@ def composite_score(
     final = tech * 0.50 + sentiment * 0.20 + alt_score * 0.30
     return final, tech, sentiment
 
+# ─── Model Drift Tespiti ──────────────────────────────────────────────────────
+def check_drift(row: dict) -> bool:
+    """
+    Özellik değerlerini eğitim dağılımıyla karşılaştırır.
+    5+ özellik 3-sigma dışındaysa drift bayrağı döner.
+    """
+    global model_stats
+    if model_stats is None:
+        return False
+    stats    = model_stats.get("stats", {})
+    outliers = []
+    for feat, val in row.items():
+        if feat in stats and stats[feat]["std"] > 0:
+            z = abs(float(val) - stats[feat]["mean"]) / stats[feat]["std"]
+            if z > 3.0:
+                outliers.append(feat)
+    if len(outliers) >= 5:
+        log.warning(f"Drift: {len(outliers)} özellik 3σ dışında → {outliers[:3]}...")
+        return True
+    return False
+
+
 # ─── ML Skor ──────────────────────────────────────────────────────────────────
 ML_FEATURES = [
     "price_ema50_ratio", "price_ema200_ratio",
     "rsi", "macd", "macd_hist", "macd_above_signal",
     "atr", "atr_pct", "bb_width", "adx", "hurst",
     "daily_return", "log_return", "volume_zscore",
-    "vix", "fed_rate", "cpi",
+    "vix", "fed_rate", "cpi", "smh_qqq_ratio",
 ]
 
-def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
+def get_ml_score(df: pd.DataFrame, macro_data: dict) -> tuple[float, bool]:
     """
     Günlük OHLCV df üzerinden indikatörleri hesaplar, en son satırı alır,
     ml_model.predict_proba() ile yükseliş olasılığını 0–100 skoruna çevirir.
@@ -667,7 +710,7 @@ def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
     """
     global ml_model
     if ml_model is None or df is None or df.empty:
-        return 50.0
+        return 50.0, False
 
     try:
         df = df.copy()
@@ -712,16 +755,18 @@ def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
             "vix":                float(macro_data.get("vix", 20.0)),
             "fed_rate":           float(macro_data.get("rate", 5.0)),
             "cpi":                float(macro_data.get("cpi", 3.0)),
+            "smh_qqq_ratio":      float(macro_data.get("smh_qqq_ratio", 0.55)),
         }
 
-        X     = pd.DataFrame([[row[f] for f in ML_FEATURES]], columns=ML_FEATURES)
-        proba = float(ml_model.predict_proba(X)[0][1])
-        score = round(proba * 100, 1)
-        return score
+        X        = pd.DataFrame([[row[f] for f in ML_FEATURES]], columns=ML_FEATURES)
+        proba    = float(ml_model.predict_proba(X)[0][1])
+        score    = round(proba * 100, 1)
+        is_drift = check_drift(row)
+        return score, is_drift
 
     except Exception as e:
         log.warning(f"ML skor hesaplama hatası: {e}")
-        return 50.0
+        return 50.0, False
 
 
 def confidence_level(tech: float, sentiment: float) -> str:
@@ -998,6 +1043,10 @@ def scan_once(engine: AlpacaEngine) -> None:
     vix              = macro_data["vix"]
     macro_multiplier = 1.0
 
+    # ── SMH/QQQ sektörel rotasyon oranı ──────────────────────────────────────
+    smh_qqq = get_smh_qqq_ratio()
+    macro_data["smh_qqq_ratio"] = smh_qqq
+
     log.info(f"[MACRO] VIX: {vix:.1f}, Faiz: {macro_data['rate']:.2f}%, Enflasyon: {macro_data['cpi']:.1f}")
 
     if vix > 30:
@@ -1014,6 +1063,7 @@ def scan_once(engine: AlpacaEngine) -> None:
         log.warning(f"Ekonomik risk flag aktif: {eco_event}")
         tg_send(f"⚠️ <b>Ekonomik Olay Uyarısı</b>\n{eco_event}\nBugün yeni pozisyon açılmayacak.")
 
+    drift_tickers = []
     for ticker in TICKERS:
         try:
             log.info(f"─── {ticker} analiz ediliyor...")
@@ -1028,8 +1078,10 @@ def scan_once(engine: AlpacaEngine) -> None:
             _, _, sentiment_s = composite_score(tech_s, reddit_s, finnhub_s, insider_s, llm_s)
 
             # ── ML Skor ───────────────────────────────────────────────────
-            ml_score = get_ml_score(tech_data.get("daily"), macro_data)
-            final    = iv_weighter.weighted_score(tech_s, ml_score)
+            ml_score, is_drift = get_ml_score(tech_data.get("daily"), macro_data)
+            if is_drift:
+                drift_tickers.append(ticker)
+            final = iv_weighter.weighted_score(tech_s, ml_score)
 
             log.info(
                 f"[ML ANALİZ] {ticker} -> "
@@ -1094,6 +1146,15 @@ def scan_once(engine: AlpacaEngine) -> None:
             log.error(f"{ticker} tarama hatası: {e}")
 
         time.sleep(2)  # Rate limit koruması
+
+    # ── Drift uyarısı (3+ ticker aynı anda drift gösterirse) ─────────────────
+    if len(drift_tickers) >= 3:
+        tg_send(
+            f"⚠️ <b>Model Drift Uyarısı</b>\n"
+            f"{', '.join(drift_tickers)} tickerlarında özellik dağılımı "
+            f"eğitim verisiyle önemli ölçüde farklılaştı.\n"
+            f"→ GitHub Actions'tan <b>Kanka Model Eğitimi</b> workflow'unu çalıştır."
+        )
 
     log.info("Tarama tamamlandı.")
 
@@ -1251,13 +1312,21 @@ def main() -> None:
             sys.exit(1)
 
     # ── ML Modeli Yükle ───────────────────────────────────────────────────────
-    global ml_model
+    global ml_model, model_stats
     try:
         ml_model = joblib.load("kanka_model.joblib")
         log.info("✅ ML modeli yüklendi: kanka_model.joblib")
     except Exception as e:
         log.warning(f"⚠️ ML modeli yüklenemedi: {e} — nötr skor (50) kullanılacak")
         ml_model = None
+
+    try:
+        model_stats = joblib.load("kanka_model_stats.joblib")
+        n_feats = len(model_stats.get("feature_cols", []))
+        log.info(f"✅ Model istatistikleri yüklendi ({n_feats} özellik — drift tespiti aktif)")
+    except Exception as e:
+        log.warning(f"⚠️ Model istatistikleri bulunamadı: {e} — drift tespiti devre dışı")
+        model_stats = None
 
     engine = AlpacaEngine()
 

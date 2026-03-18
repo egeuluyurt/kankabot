@@ -36,5 +36,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kanka-brain-model
-          path: kanka_model.joblib
+          path: |
+            kanka_model.joblib
+            kanka_model_stats.joblib
           retention-days: 30

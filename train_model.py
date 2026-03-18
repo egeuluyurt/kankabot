@@ -105,3 +105,17 @@ for rank, idx in enumerate(top5_idx, 1):
 # ─── Kaydet ───────────────────────────────────────────────────────────────────
 joblib.dump(best_model, MODEL_FILE)
 log.info(f"Model kaydedildi: {MODEL_FILE}")
+
+# ─── Drift tespiti için referans istatistikleri ───────────────────────────────
+ref_stats = {}
+for feat in feature_cols:
+    col_data = df[feat].dropna()
+    ref_stats[feat] = {
+        "mean": float(col_data.mean()),
+        "std":  float(col_data.std()),
+        "p5":   float(col_data.quantile(0.05)),
+        "p95":  float(col_data.quantile(0.95)),
+    }
+stats_payload = {"feature_cols": feature_cols, "stats": ref_stats}
+joblib.dump(stats_payload, "kanka_model_stats.joblib")
+log.info("Referans istatistikleri kaydedildi: kanka_model_stats.joblib")

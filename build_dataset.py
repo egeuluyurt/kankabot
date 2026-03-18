@@ -39,15 +39,17 @@ def triple_barrier_label(
 ) -> list:
     """
     Her satır için gerçek trade senaryosunu simüle eder.
+    max_bars anlık ATR/Rolling_ATR rasyosuna göre dinamik ayarlanır:
+      ATR > 1.5×ort → 3 bar  (yüksek vol: hızlı karar)
+      ATR < 0.7×ort → 8 bar  (düşük vol: pozisyona zaman ver)
+      Normal         → 5 bar
     +1 = TP bariyerine önce çarptı
     -1 = SL bariyerine önce çarptı
-     0 = max_bars doldu (nötr)
+     0 = bariyer doldu (nötr/timeout)
     Ham fiyat DROP'tan ÖNCE çağrılmalıdır.
     """
     if "atr" not in df.columns:
         raise ValueError("ATR kolonu eksik")
-
-    closes = df["close"].values if "close" in df.columns else None
 
     raw_closes = df["close"].values if "close" in df.columns else \
                  (df["price_ema200_ratio"].values * df["ema200"].values
@@ -57,19 +59,38 @@ def triple_barrier_label(
     lows  = df["low"].values  if "low"  in df.columns else raw_closes
     atrs  = df["atr"].values
 
+    # ATR rolling ortalaması — dinamik bariyer süresi için
+    rolling_atr = pd.Series(atrs).rolling(20, min_periods=5).mean().values
+    MAX_POSSIBLE = max_bars + 3  # maksimum olası bariyer (8 bar)
+
     labels = []
-    for i in range(len(df) - max_bars):
+    for i in range(len(df) - MAX_POSSIBLE):
         atr_i = atrs[i]
         if pd.isna(atr_i) or atr_i <= 0:
             labels.append(None)
             continue
+
+        # ── Dinamik bariyer süresi ────────────────────────────────────────────
+        roll_i = rolling_atr[i]
+        if pd.notna(roll_i) and roll_i > 0:
+            ratio = atr_i / roll_i
+            if ratio > 1.5:
+                n_bars = max(2, max_bars - 2)       # Yüksek vol: 3 bar
+            elif ratio < 0.7:
+                n_bars = MAX_POSSIBLE               # Düşük vol: 8 bar
+            else:
+                n_bars = max_bars                   # Normal: 5 bar
+        else:
+            n_bars = max_bars
 
         entry = raw_closes[i] if raw_closes is not None else 0
         sl    = entry - sl_mult * atr_i
         tp    = entry + tp_mult * atr_i
         result = 0
 
-        for j in range(1, max_bars + 1):
+        for j in range(1, n_bars + 1):
+            if i + j >= len(lows):
+                break
             lo = lows[i + j]
             hi = highs[i + j] if highs is not None else lo
 
@@ -88,7 +109,7 @@ def triple_barrier_label(
 
         labels.append(result)
 
-    labels += [None] * max_bars
+    labels += [None] * MAX_POSSIBLE
     return labels
 
 
@@ -112,6 +133,32 @@ FRED_SERIES = {
     "fed_rate":  "DFF",       # Fed Funds Rate (günlük)
     "cpi":       "CPIAUCSL",  # CPI (aylık — merge_asof ile günlüğe eşlenir)
 }
+
+
+# ─── SMH/QQQ Sektörel Rotasyon Oranı ─────────────────────────────────────────
+def fetch_smh_qqq_ratio() -> pd.DataFrame:
+    """
+    SMH/QQQ fiyat oranını günlük bazda hesaplar.
+    Döndürür: 'smh_qqq_ratio' kolonlu DataFrame (date index)
+    """
+    try:
+        smh = yf.Ticker("SMH").history(start=START_DATE, end=END_DATE,
+                                       interval="1d", auto_adjust=True)
+        qqq = yf.Ticker("QQQ").history(start=START_DATE, end=END_DATE,
+                                       interval="1d", auto_adjust=True)
+        smh.index = pd.to_datetime(smh.index).tz_localize(None)
+        qqq.index = pd.to_datetime(qqq.index).tz_localize(None)
+
+        ratio = (smh["Close"] / qqq["Close"]).rename("smh_qqq_ratio")
+        daily_idx = pd.date_range(START_DATE, END_DATE, freq="D")
+        ratio = ratio.reindex(daily_idx).ffill()
+        log.info(f"SMH/QQQ ratio: {len(ratio)} satır, "
+                 f"ort={ratio.mean():.4f}, std={ratio.std():.4f}")
+        return pd.DataFrame(ratio)
+    except Exception as e:
+        log.warning(f"SMH/QQQ ratio çekilemedi: {e} — NaN kullanılıyor")
+        daily_idx = pd.date_range(START_DATE, END_DATE, freq="D")
+        return pd.DataFrame({"smh_qqq_ratio": np.nan}, index=daily_idx)
 
 
 # ─── Makro Veri (FRED) ────────────────────────────────────────────────────────
@@ -284,8 +331,22 @@ def main():
     log.info(f"  Tickers : {', '.join(TICKERS)}")
     log.info("=" * 55)
 
-    # Makro veriyi bir kez çek
-    macro_df = fetch_fred_series()
+    # Makro + sektörel rotasyon verisini bir kez çek
+    macro_df  = fetch_fred_series()
+    ratio_df  = fetch_smh_qqq_ratio()
+
+    # SMH/QQQ ratio'yu macro_df'e ekle
+    ratio_reset = ratio_df.reset_index()
+    ratio_reset.rename(columns={"index": "date"}, inplace=True)
+    ratio_reset["date"] = pd.to_datetime(ratio_reset["date"]).dt.normalize()
+    macro_reset2 = macro_df.reset_index()
+    macro_reset2.rename(columns={"index": "date"}, inplace=True)
+    macro_reset2["date"] = pd.to_datetime(macro_reset2["date"]).dt.normalize()
+    macro_df = pd.merge_asof(
+        macro_reset2.sort_values("date"),
+        ratio_reset.sort_values("date"),
+        on="date", direction="backward",
+    ).set_index("date")
 
     all_frames = []
     for ticker in TICKERS:
@@ -309,7 +370,7 @@ def main():
                    "rsi", "macd", "macd_hist", "macd_above_signal",
                    "atr", "atr_pct", "bb_width", "adx", "hurst",
                    "daily_return", "log_return", "volume_zscore"]
-    macro_cols  = list(FRED_SERIES.keys())
+    macro_cols  = list(FRED_SERIES.keys()) + ["smh_qqq_ratio"]
     label_cols  = ["target"]
     ordered     = base_cols + tech_cols + macro_cols + label_cols
     existing    = [c for c in ordered if c in combined.columns]
