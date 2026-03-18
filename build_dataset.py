@@ -116,8 +116,8 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     df = df.sort_values("date").reset_index(drop=True)
 
-    close = df["close"]
     df = df.set_index("date")  # teknik hesaplar için index'e al
+    close = df["close"]
 
     # ── Teknik indikatörler ───────────────────────────────────────────────────
     df["ema50"]  = close.ewm(span=50,  adjust=False, min_periods=0).mean()
