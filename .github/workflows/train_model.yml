@@ -1,0 +1,36 @@
+name: Kanka Model Eğitimi
+
+on:
+  workflow_dispatch:   # Sadece manuel tetikleme
+
+jobs:
+  train:
+    name: Model Eğit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
+
+      - name: config.env oluştur (eğitim için FRED_API_KEY opsiyonel)
+        run: |
+          echo "FRED_API_KEY=${{ secrets.FRED_API_KEY }}" >> config.env
+
+      - name: Modeli eğit
+        run: python train_model.py
+
+      - name: Modeli artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: kanka-brain-model
+          path: kanka_model.joblib
+          retention-days: 30

@@ -8,3 +8,6 @@ tenacity==9.0.0
 requests==2.32.3
 python-dotenv==1.0.1
 fredapi==0.5.2
+lightgbm
+scikit-learn
+joblib
