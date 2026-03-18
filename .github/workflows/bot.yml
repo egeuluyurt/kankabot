@@ -2,15 +2,10 @@ name: Kanka Sinyal Botu
 
 on:
   schedule:
-    # NYSE açık saatlerinde saatte bir tara (UTC)
-    # Kış (EST):  14:45 UTC = 09:45 ET  |  Yaz (EDT): 13:45 UTC = 09:45 ET
-    # Her ikisini de ekledik — DST geçişinde sorun olmaz
-    - cron: '45 14 * * 1-5'   # 09:45 ET (kış - EST)
-    - cron: '45 15 * * 1-5'   # 11:45 ET (kış)
-    - cron: '45 16 * * 1-5'   # 12:45 ET (kış)
-    - cron: '45 17 * * 1-5'   # 13:45 ET (kış)
-    - cron: '45 18 * * 1-5'   # 14:45 ET (kış)
-    - cron: '45 19 * * 1-5'   # 15:45 ET (kış) — kapanmadan 15 dk önce
+    # NYSE açık saatlerinde 15 dk'da bir tara (UTC)
+    # Kış (EST=UTC-5): 14:30–21:00 UTC | Yaz (EDT=UTC-4): 13:30–20:00 UTC
+    # 13–21 UTC arası her :00, :15, :30, :45 — is_market_hours() borsa dışını filtreler
+    - cron: '0,15,30,45 13-21 * * 1-5'
   workflow_dispatch:           # Manuel tetikleme (test için)
 
 jobs:
