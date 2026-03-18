@@ -116,32 +116,38 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     df = df[["date", "open", "high", "low", "close", "volume"]].copy()
     df = df.sort_values("date").reset_index(drop=True)
 
+    # ── float64 zorla + NaN temizle (ta kütüphanesi için hazırlık) ──────────────
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+    df = df.reset_index(drop=True)
+
     df = df.set_index("date")  # teknik hesaplar için index'e al
     close = df["close"]
 
-    # ── Teknik indikatörler ───────────────────────────────────────────────────
-    df["ema50"]  = close.ewm(span=50,  adjust=False, min_periods=0).mean()
-    df["ema200"] = close.ewm(span=200, adjust=False, min_periods=0).mean()
-    df["price_ema200_ratio"] = close / df["ema200"]
+    # ── Teknik indikatörler (.values ile index çakışması engellenir) ──────────
+    df["ema50"]  = close.ewm(span=50,  adjust=False, min_periods=0).mean().values
+    df["ema200"] = close.ewm(span=200, adjust=False, min_periods=0).mean().values
+    df["price_ema200_ratio"] = (close / df["ema200"]).values
 
-    df["rsi"] = ta.momentum.rsi(close, window=14)
+    df["rsi"] = ta.momentum.rsi(close, window=14).values
 
     macd_ind     = ta.trend.MACD(close, window_fast=12, window_slow=26, window_sign=9)
-    df["macd"]      = macd_ind.macd()
-    df["macd_hist"] = macd_ind.macd_diff()
-    df["macd_above_signal"] = (macd_ind.macd() > macd_ind.macd_signal()).astype(int)
+    df["macd"]      = macd_ind.macd().values
+    df["macd_hist"] = macd_ind.macd_diff().values
+    df["macd_above_signal"] = (macd_ind.macd() > macd_ind.macd_signal()).astype(int).values
 
     atr_ind  = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14)
-    df["atr"]     = atr_ind.average_true_range()
-    df["atr_pct"] = df["atr"] / close
+    df["atr"]     = atr_ind.average_true_range().values
+    df["atr_pct"] = (df["atr"] / close).values
 
     bb = ta.volatility.BollingerBands(close, window=20)
-    df["bb_width"] = (bb.bollinger_hband() - bb.bollinger_lband()) / close
+    df["bb_width"] = ((bb.bollinger_hband() - bb.bollinger_lband()) / close).values
 
     # ── ADX (ta library, tüm seri) ────────────────────────────────────────────
     if len(df) >= 15:
         adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
-        df["adx"] = adx_ind.adx()
+        df["adx"] = adx_ind.adx().values
     else:
         df["adx"] = float("nan")
 
@@ -163,11 +169,11 @@ def process_ticker(ticker: str, macro_df: pd.DataFrame) -> pd.DataFrame:
     df["hurst"] = hurst_vals
 
     # ── Günlük fiyat değişimi ─────────────────────────────────────────────────
-    df["daily_return"] = close.pct_change()
+    df["daily_return"] = close.pct_change().values
 
     # ── TARGET: 5 iş günü sonrası %2+ yükseliş = 1 ───────────────────────────
-    df["future_close"] = close.shift(-FORWARD_BARS)
-    df["target"]       = ((df["future_close"] / close - 1) >= TARGET_PCT / 100).astype(int)
+    df["future_close"] = close.shift(-FORWARD_BARS).values
+    df["target"]       = ((df["future_close"] / close.values - 1) >= TARGET_PCT / 100).astype(int)
 
     # ── Makro veriyi merge_asof ile ekle (Düzeltme 3: tarih format eşitleme) ──
     df = df.reset_index()                                  # date index → sütun
