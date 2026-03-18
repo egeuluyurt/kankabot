@@ -1,0 +1,38 @@
+name: Kanka Veri Fabrikası
+
+on:
+  workflow_dispatch:   # Sadece elle tetiklenir
+
+jobs:
+  build:
+    name: Eğitim Verisi Üret
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
+
+      - name: config.env oluştur
+        run: |
+          echo "FRED_API_KEY=${{ secrets.FRED_API_KEY }}" >> config.env
+          echo "FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}" >> config.env
+          echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> config.env
+
+      - name: Veri setini oluştur
+        run: python build_dataset.py
+
+      - name: CSV'yi artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: kanka-training-data
+          path: kanka_training_data.csv
+          retention-days: 30
