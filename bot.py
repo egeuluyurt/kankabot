@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import joblib
 import requests
 import yfinance as yf
 import pandas as pd
@@ -71,7 +72,7 @@ FINNHUB_API_KEY   = os.getenv("FINNHUB_API_KEY", "")
 TG_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID", "")
 TICKERS           = [t.strip() for t in os.getenv("TICKERS", "NVDA,AMD,QQQ,SMH,AAPL,MSFT,TSLA,PLTR,SPY,UNH").split(",")]
-BUY_THRESHOLD     = float(os.getenv("BUY_THRESHOLD", "65"))
+BUY_THRESHOLD     = float(os.getenv("BUY_THRESHOLD", "70"))
 SELL_THRESHOLD    = float(os.getenv("SELL_THRESHOLD", "35"))
 POSITION_PCT      = float(os.getenv("POSITION_PCT", "5"))
 MAX_POSITIONS     = int(os.getenv("MAX_POSITIONS", "3"))
@@ -81,7 +82,8 @@ SCAN_INTERVAL     = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
 
 # ─── Global durum ─────────────────────────────────────────────────────────────
 BOT_PAUSED = False
-vader = SentimentIntensityAnalyzer()
+vader      = SentimentIntensityAnalyzer()
+ml_model   = None   # joblib ile yüklenen LGBMClassifier (main'de doldurulur)
 
 # ─── Finansal VADER ön işleme sözlüğü ────────────────────────────────────────
 VADER_REPLACE = {
@@ -435,6 +437,7 @@ def get_technical_score(ticker: str) -> dict:
         )
 
         result["tech_score"] = tech_score
+        result["daily"]      = daily   # get_ml_score için ham günlük veri
 
     except Exception as e:
         log.error(f"{ticker} teknik analiz hatası: {e}")
@@ -570,6 +573,80 @@ def composite_score(
 
     final = tech * 0.50 + sentiment * 0.20 + alt_score * 0.30
     return final, tech, sentiment
+
+# ─── ML Skor ──────────────────────────────────────────────────────────────────
+ML_FEATURES = [
+    "open", "high", "low", "close", "volume",
+    "ema50", "ema200", "price_ema200_ratio",
+    "rsi", "macd", "macd_hist", "macd_above_signal",
+    "atr", "atr_pct", "bb_width", "adx", "hurst", "daily_return",
+    "vix", "fed_rate", "cpi",
+]
+
+def get_ml_score(df: pd.DataFrame, macro_data: dict) -> float:
+    """
+    Günlük OHLCV df üzerinden indikatörleri hesaplar, en son satırı alır,
+    ml_model.predict_proba() ile yükseliş olasılığını 0–100 skoruna çevirir.
+    Model yüklü değilse veya hata olursa 50 (nötr) döner.
+    """
+    global ml_model
+    if ml_model is None or df is None or df.empty:
+        return 50.0
+
+    try:
+        df = df.copy()
+        close = df["close"].ffill()
+
+        ema50  = close.ewm(span=50,  adjust=False, min_periods=0).mean()
+        ema200 = close.ewm(span=200, adjust=False, min_periods=0).mean()
+
+        macd_ind = ta.trend.MACD(close, window_fast=12, window_slow=26, window_sign=9)
+        atr_ind  = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14)
+        bb_ind   = ta.volatility.BollingerBands(close, window=20)
+        adx_ind  = ta.trend.ADXIndicator(df["high"], df["low"], close, window=14)
+
+        atr_val = float(atr_ind.average_true_range().iloc[-1])
+
+        # Hurst: son 60 günlük pencerede hesapla
+        from regime import calculate_hurst
+        try:
+            hurst = calculate_hurst(close.iloc[-60:]) if len(close) >= 20 else 0.5
+        except Exception:
+            hurst = 0.5
+
+        row = {
+            "open":               float(df["open"].iloc[-1]),
+            "high":               float(df["high"].iloc[-1]),
+            "low":                float(df["low"].iloc[-1]),
+            "close":              float(close.iloc[-1]),
+            "volume":             float(df["volume"].iloc[-1]),
+            "ema50":              float(ema50.iloc[-1]),
+            "ema200":             float(ema200.iloc[-1]),
+            "price_ema200_ratio": float(close.iloc[-1] / ema200.iloc[-1]),
+            "rsi":                float(ta.momentum.rsi(close, window=14).iloc[-1]),
+            "macd":               float(macd_ind.macd().iloc[-1]),
+            "macd_hist":          float(macd_ind.macd_diff().iloc[-1]),
+            "macd_above_signal":  int(macd_ind.macd().iloc[-1] > macd_ind.macd_signal().iloc[-1]),
+            "atr":                atr_val,
+            "atr_pct":            atr_val / float(close.iloc[-1]),
+            "bb_width":           float((bb_ind.bollinger_hband().iloc[-1] - bb_ind.bollinger_lband().iloc[-1]) / close.iloc[-1]),
+            "adx":                float(adx_ind.adx().iloc[-1]),
+            "hurst":              hurst,
+            "daily_return":       float(close.pct_change().iloc[-1]),
+            "vix":                float(macro_data.get("vix", 20.0)),
+            "fed_rate":           float(macro_data.get("rate", 5.0)),
+            "cpi":                float(macro_data.get("cpi", 3.0)),
+        }
+
+        X     = pd.DataFrame([[row[f] for f in ML_FEATURES]], columns=ML_FEATURES)
+        proba = float(ml_model.predict_proba(X)[0][1])
+        score = round(proba * 100, 1)
+        return score
+
+    except Exception as e:
+        log.warning(f"ML skor hesaplama hatası: {e}")
+        return 50.0
+
 
 def confidence_level(tech: float, sentiment: float) -> str:
     """İki skor aynı yönde ise YÜKSEK, aksi hâlde ORTA."""
@@ -739,15 +816,24 @@ def scan_once(engine: AlpacaEngine) -> None:
             insider_s  = get_insider_sentiment(ticker)
             llm_s      = get_llm_sentiment_analysis(ticker)
 
-            final, tech_s, sentiment_s = composite_score(
-                tech_data["tech_score"], reddit_s, finnhub_s, insider_s, llm_s
+            tech_s      = tech_data["tech_score"]
+            _, _, sentiment_s = composite_score(tech_s, reddit_s, finnhub_s, insider_s, llm_s)
+
+            # ── ML Skor ───────────────────────────────────────────────────
+            ml_score = get_ml_score(tech_data.get("daily"), macro_data)
+            final    = round(tech_s * 0.4 + ml_score * 0.6, 1)
+
+            log.info(
+                f"[ML ANALİZ] {ticker} -> "
+                f"Teknik: {tech_s:.1f}, ML: {ml_score:.1f}, Final: {final:.1f}"
             )
+
             conf   = confidence_level(tech_s, sentiment_s)
             signal = signal_label(final, conf)
 
             log.info(
                 f"{ticker} | Final={final:.1f} | Tech={tech_s:.1f} | "
-                f"Sentiment={sentiment_s:.1f} | Güven={conf} | {signal}"
+                f"ML={ml_score:.1f} | Sentiment={sentiment_s:.1f} | Güven={conf} | {signal}"
             )
 
             action_msg = "İşlem yapılmadı"
@@ -781,7 +867,7 @@ def scan_once(engine: AlpacaEngine) -> None:
                 _send_signal_message(
                     ticker, signal, final, conf, tech_data,
                     reddit_s, finnhub_s, sentiment_s,
-                    insider_s, llm_s, action_msg, engine.mod
+                    insider_s, llm_s, ml_score, action_msg, engine.mod
                 )
 
         except Exception as e:
@@ -794,7 +880,7 @@ def scan_once(engine: AlpacaEngine) -> None:
 def _send_signal_message(
     ticker, signal, final, conf, tech_data,
     reddit_s, finnhub_s, sentiment_s,
-    insider_s, llm_s, action_msg, mod
+    insider_s, llm_s, ml_score, action_msg, mod
 ) -> None:
     """Telegram'a sinyal bildirimi gönderir (HTML formatı)."""
     now = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
@@ -802,15 +888,23 @@ def _send_signal_message(
     price    = tech_data.get("price", 0)
     sl_price = price - ATR_SL_MULT * atr_val
     tp_price = price + ATR_TP_MULT * atr_val
+    tech_s   = tech_data["tech_score"]
+
+    ml_status = "🟢 Aktif" if ml_model is not None else "🔴 Yüklenmedi (nötr=50)"
 
     text = (
         f"<b>{signal} — {ticker}</b>\n"
         f"⏰ {now} | Mod: {mod}\n"
         f"\n"
-        f"<b>📊 Bileşik Skor:</b> {final:.1f} / 100\n"
+        f"<b>📊 Final Skor:</b> {final:.1f} / 100\n"
         f"<b>🎯 Güven:</b> {conf}\n"
         f"\n"
-        f"<b>Teknik ({tech_data['tech_score']:.1f}):</b>\n"
+        f"<b>🤖 ML Analiz ({ml_status}):</b>\n"
+        f"  ML Tahmini (yükseliş iht.) : {ml_score:.1f}/100\n"
+        f"  Teknik Skor                : {tech_s:.1f}/100\n"
+        f"  Final = Teknik×0.4 + ML×0.6 : {tech_s*0.4:.1f} + {ml_score*0.6:.1f} = {final:.1f}\n"
+        f"\n"
+        f"<b>Teknik ({tech_s:.1f}):</b>\n"
         f"  Günlük filtre : {tech_data['daily_score']:.0f}\n"
         f"  RSI(14)       : {tech_data['rsi_val']:.1f}\n"
         f"  MACD yön      : {tech_data['macd_dir']}\n"
@@ -935,6 +1029,15 @@ def main() -> None:
         if val in ("", "BURAYA_YAZ"):
             log.error(f"{key} tanımlı değil.")
             sys.exit(1)
+
+    # ── ML Modeli Yükle ───────────────────────────────────────────────────────
+    global ml_model
+    try:
+        ml_model = joblib.load("kanka_model.joblib")
+        log.info("✅ ML modeli yüklendi: kanka_model.joblib")
+    except Exception as e:
+        log.warning(f"⚠️ ML modeli yüklenemedi: {e} — nötr skor (50) kullanılacak")
+        ml_model = None
 
     engine = AlpacaEngine()
 
