@@ -38,6 +38,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
 
 from regime import detect_regime, MarketRegime
+from sizing import calculate_position_size
 
 from telegram import Update
 from telegram.error import Conflict
@@ -577,9 +578,16 @@ def place_bracket_buy(
     portfolio_value: float,
     price: float,
     atr: float,
+    final_score: float = 65.0,
 ) -> str:
     """Bracket limit-buy emri gönderir. Giriş fiyatı mid-point (bid/ask ortası)."""
-    notional = portfolio_value * POSITION_PCT / 100
+    notional = calculate_position_size(
+        portfolio_value=portfolio_value,
+        final_score=final_score,
+        atr=atr,
+        price=price,
+        tp_sl_ratio=ATR_TP_MULT / ATR_SL_MULT,
+    )
 
     # Gerçek zamanlı mid-point al; başarısız olursa teknik analiz fiyatını kullan
     mid = engine.get_mid_price(ticker)
@@ -680,7 +688,7 @@ def scan_once(engine: AlpacaEngine) -> None:
                 if ok:
                     action_msg = place_bracket_buy(
                         engine, ticker, portfolio_val,
-                        tech_data["price"], tech_data["atr"]
+                        tech_data["price"], tech_data["atr"], final
                     )
                     # Pozisyonu listeye ekle (cache için sahte nesne)
                     active_tickers.add(ticker)
