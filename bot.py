@@ -86,6 +86,39 @@ CRITICAL_DATA_OK = True   # False olursa tüm alımlar durur
 vader      = SentimentIntensityAnalyzer()
 ml_model   = None   # joblib ile yüklenen LGBMClassifier (main'de doldurulur)
 
+class InverseVarianceWeighter:
+    def __init__(self, window: int = 20):
+        self.window     = window
+        self._tech: list = []
+        self._ml:   list = []
+
+    def weighted_score(self, tech: float, ml: float) -> float:
+        self._tech.append(tech)
+        self._ml.append(ml)
+        if len(self._tech) > self.window:
+            self._tech.pop(0)
+            self._ml.pop(0)
+
+        if len(self._tech) < 5:
+            w_t, w_m = 0.4, 0.6   # yeterli veri yoksa sabit fallback
+        else:
+            var_t = max(pd.Series(self._tech).var(), 1e-6)
+            var_m = max(pd.Series(self._ml).var(),   1e-6)
+            inv_t = 1.0 / var_t
+            inv_m = 1.0 / var_m
+            total = inv_t + inv_m
+            w_t   = inv_t / total
+            w_m   = inv_m / total
+
+        final = tech * w_t + ml * w_m
+        log.info(
+            f"IV Ağırlık → Tech: {w_t:.2f}, ML: {w_m:.2f}, "
+            f"Final: {final:.1f}"
+        )
+        return round(final, 1)
+
+iv_weighter = InverseVarianceWeighter(window=20)
+
 # ─── Finansal VADER ön işleme sözlüğü ────────────────────────────────────────
 VADER_REPLACE = {
     r"\bputs\b":        "terrible",
@@ -844,7 +877,7 @@ def scan_once(engine: AlpacaEngine) -> None:
 
             # ── ML Skor ───────────────────────────────────────────────────
             ml_score = get_ml_score(tech_data.get("daily"), macro_data)
-            final    = round(tech_s * 0.4 + ml_score * 0.6, 1)
+            final    = iv_weighter.weighted_score(tech_s, ml_score)
 
             log.info(
                 f"[ML ANALİZ] {ticker} -> "

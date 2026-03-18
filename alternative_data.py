@@ -10,6 +10,8 @@ Env var'lar fonksiyon çağrısında okunur (load_dotenv() sıralaması nedeniyl
 """
 
 import os
+import re
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -20,6 +22,28 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from fredapi import Fred
 
 log = logging.getLogger(__name__)
+
+
+def _parse_llm_score(raw: str) -> float:
+    """LLM çıktısını güvenli şekilde parse eder."""
+    if raw is None:
+        return 50.0
+    raw = str(raw).strip()
+    try:
+        data = json.loads(raw)
+        val  = float(data['score'])
+        if 0 <= val <= 100:
+            return val
+    except Exception:
+        pass
+    match = re.search(r'\b([0-9]{1,3})\b', raw)
+    if match:
+        val = int(match.group(1))
+        if 0 <= val <= 100:
+            return float(val)
+    log.warning(f"LLM skoru parse edilemedi: {raw[:80]}")
+    return 50.0
+
 
 # Yüksek etkili ekonomik olay anahtar kelimeleri
 HIGH_IMPACT_KEYWORDS = [
@@ -244,6 +268,8 @@ def get_llm_sentiment_analysis(ticker: str) -> Optional[float]:
         f"duyarlılığı açısından analiz et. "
         f"0 (çok negatif) ile 100 (çok pozitif) arasında SADECE bir tam sayı "
         f"döndür, başka hiçbir şey yazma.\n\n{headlines_text}"
+        "\n\nYanıtını SADECE şu JSON formatında ver, başka hiçbir şey yazma:\n"
+        "{\"score\": <0-100 arası tam sayı>, \"reason\": \"<max 10 kelime>\"}"
     )
 
     # ── 1. Gemini 1.5 Flash (öncelikli) ──────────────────────────────────────
@@ -260,8 +286,7 @@ def get_llm_sentiment_analysis(ticker: str) -> Optional[float]:
             )
             resp.raise_for_status()
             raw   = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            score = float(raw)
-            score = max(0.0, min(score, 100.0))
+            score = _parse_llm_score(raw)
             log.info(f"{ticker} Gemini sentiment: {score:.0f} ({len(headlines)} haber)")
             return score
         except Exception as e:
@@ -286,8 +311,7 @@ def get_llm_sentiment_analysis(ticker: str) -> Optional[float]:
             )
             resp.raise_for_status()
             raw   = resp.json()["choices"][0]["message"]["content"].strip()
-            score = float(raw)
-            score = max(0.0, min(score, 100.0))
+            score = _parse_llm_score(raw)
             log.info(f"{ticker} OpenAI sentiment: {score:.0f} ({len(headlines)} haber)")
             return score
         except Exception as e:
