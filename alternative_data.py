@@ -79,11 +79,15 @@ def get_fred_macro_data() -> dict:
             f"Faiz={result['rate']:.2f}% | "
             f"Enflasyon={result['cpi']:.1f}"
         )
+        import bot
+        bot.CRITICAL_DATA_OK = True
         return result
 
     except Exception as e:
-        log.warning(f"[MACRO] FRED bağlantısı başarısız: {e} — varsayılan değerler kullanılıyor")
-        return defaults
+        import bot
+        bot.CRITICAL_DATA_OK = False
+        log.error("KRİTİK: Makro veri alınamadı — Dead Man's Switch aktif")
+        return {}
 
 
 # ─── Insider Sentiment ────────────────────────────────────────────────────────

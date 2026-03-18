@@ -81,7 +81,8 @@ ATR_TP_MULT       = float(os.getenv("ATR_TP_MULT", "3.0"))
 SCAN_INTERVAL     = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
 
 # ─── Global durum ─────────────────────────────────────────────────────────────
-BOT_PAUSED = False
+BOT_PAUSED       = False
+CRITICAL_DATA_OK = True   # False olursa tüm alımlar durur
 vader      = SentimentIntensityAnalyzer()
 ml_model   = None   # joblib ile yüklenen LGBMClassifier (main'de doldurulur)
 
@@ -654,14 +655,30 @@ def confidence_level(tech: float, sentiment: float) -> str:
         return "YÜKSEK"
     return "ORTA"
 
-def signal_label(final: float, confidence: str) -> str:
+def get_dynamic_thresholds(vix: float) -> tuple:
+    """
+    VIX seviyesine göre alım/satım eşiklerini dinamik ayarlar.
+    Düşük volatilitede eşikler daralır (daha fazla sinyal).
+    Krizde eşikler genişler (sahte sinyallerden korunur).
+    """
+    if vix < 15:
+        return 62.0, 42.0    # Düşük vol: dar bant
+    elif vix <= 25:
+        return 70.0, 35.0    # Normal: mevcut değerler
+    elif vix <= 35:
+        return 78.0, 28.0    # Yüksek vol: genişlet
+    else:
+        return 85.0, 22.0    # Kriz: maksimum genişlik
+
+def signal_label(final: float, confidence: str, vix: float = 20.0) -> str:
+    buy_thr, sell_thr = get_dynamic_thresholds(vix)
     if final >= 80 and confidence == "YÜKSEK":
         return "💪 GÜÇLÜ AL"
-    if final >= BUY_THRESHOLD:
+    if final >= buy_thr:
         return "✅ AL"
     if final <= 20 and confidence == "YÜKSEK":
         return "🔴 GÜÇLÜ SAT"
-    if final <= SELL_THRESHOLD:
+    if final <= sell_thr:
         return "🔴 SAT"
     return "⏸ BEKLE"
 
@@ -679,6 +696,8 @@ def should_buy(
     global BOT_PAUSED
     if BOT_PAUSED:
         return False, "Bot duraklatıldı"
+    if not CRITICAL_DATA_OK:
+        return False, "Dead Man's Switch aktif — kritik veri yok"
     if not is_market_hours():
         return False, "Borsa kapalı"
     if regime == MarketRegime.RANGING:
@@ -787,6 +806,10 @@ def scan_once(engine: AlpacaEngine) -> None:
 
     # ── Makro veri — tarama başında bir kez çekilir ──────────────────────────
     macro_data       = get_fred_macro_data()
+    if not CRITICAL_DATA_OK or not macro_data:
+        log.error("Dead Man's Switch: Kritik veri eksik, tarama iptal edildi")
+        tg_send("🛑 <b>Dead Man's Switch</b>\nMakro veri alınamadı — tüm işlemler durduruldu.")
+        return
     vix              = macro_data["vix"]
     macro_multiplier = 1.0
 
@@ -829,7 +852,7 @@ def scan_once(engine: AlpacaEngine) -> None:
             )
 
             conf   = confidence_level(tech_s, sentiment_s)
-            signal = signal_label(final, conf)
+            signal = signal_label(final, conf, vix)
 
             log.info(
                 f"{ticker} | Final={final:.1f} | Tech={tech_s:.1f} | "
